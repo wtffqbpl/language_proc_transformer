@@ -193,3 +193,22 @@ prediction = simplenet(img)
 prediction = prediction.argmax()
 print(labels[prediction])
 
+# Model saving
+# This stores both the parameters and the structure of the model to a file.
+# This might be a problem if you change the structure of the model at a
+# later point. For this reason, it's more common to save a model's state
+# dict instead. This is a standard Python dict that contains the maps of
+# each layer's parameters in the model. Saving the state_dict looks like
+# this:
+# torch.save(simplenet.state_dict(), './simplenet')
+# To restore, create an instance of the model first and then use
+# load_state_dict().
+# simplenet = SimpleNet()
+# simplenet_state_dict = torch.load('./simplenet')
+# simplenet.load_state_dict(simplenet_state_dict)
+
+torch.save(simplenet, './simplenet')
+
+# Model loading
+simplenet = torch.load('./simplenet')
+
