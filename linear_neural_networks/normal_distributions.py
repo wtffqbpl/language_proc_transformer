@@ -66,28 +66,37 @@ class LinearNeuralNetworkNaive:
                 param.grad.zero_()
 
     def forward(self):
+        # 定义真实值
         true_w = torch.tensor([2, -3.4])
         true_b = 4.2
 
+        # 构造数据集
         features, labels = self.synthetic_data(true_w, true_b, 1000)
 
         print("features: ", features[0], '\nlabel: ', labels[0])
 
+        # 定义 hyperparameters
         batch_size = 10
         lr = 0.03
         num_epochs = 3
         net = self.linreg
         loss = self.squared_loss
 
+        # 随机初始化输入值
         w = torch.normal(0, 0.01, size=(2, 1), requires_grad=True)
         b = torch.zeros(1, requires_grad=True)
 
+        # 开始迭代
         for epoch in range(num_epochs):
             for X, y in self.data_iter(batch_size, features, labels):
+                # 1. 使用 X, w, b 来计算y^hat, 并计算与真实值y之间的loss
                 l = loss(net(X, w, b), y)
+                # 利用backward 计算梯度
                 l.sum().backward()
+                # 使用参数的梯度更新参数
                 self.sgd([w, b], lr, batch_size)
 
+            # torch.no_grad() --- Context manager that disables gradient calculation.
             with torch.no_grad():
                 train_l = loss(net(features, w, b), labels)
                 print(f"epoch {epoch + 1}, loss {float(train_l.mean()):f}")
