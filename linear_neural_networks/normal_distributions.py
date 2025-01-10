@@ -2,8 +2,8 @@
 
 import torch
 import torch.nn as nn
-import torch.functional as F
 import torch.optim as optim
+import torch.utils.data as data
 import math
 import numpy as np
 import random
@@ -53,8 +53,8 @@ class LinearNeuralNetworkNaive:
             batch_indices = torch.tensor(indices[i: min(i + batch_size, num_examples)])
             yield features[batch_indices], labels[batch_indices]
 
-    def linreg(self, X, w, b):
-        return torch.matmul(X, w) + b
+    def linreg(self, x, w, b):
+        return torch.matmul(x, w) + b
 
     def squared_loss(self, y_hat, y):
         return (y_hat - y.reshape(y_hat.shape)) ** 2 / 2
@@ -105,6 +105,64 @@ class LinearNeuralNetworkNaive:
         print(f'b loss: {true_b - b}')
 
 
+class LinearNeuralNetworkSimple:
+    def __init__(self):
+        self._batch_size = 10
+        self._true_w = torch.tensor([2, -3.4])
+        self._true_b = 4.2
+        self._features, self._labels = self._synthetic_data(self._true_w, self._true_b, 1000)
+
+    def _synthetic_data(self, w, b, num_samples):
+        x = torch.normal(0, 1, (num_samples, len(w)))
+        y = torch.matmul(x, w) + b
+        y += torch.normal(0, 0.01, y.shape)
+        return x, y.reshape((-1, 1))
+
+    def _load_array(self, data_array, batch_size, is_train=True):
+        """ Construct a PyTorch data iterator """
+        dataset = data.TensorDataset(*data_array)
+        return data.DataLoader(dataset, batch_size, shuffle=is_train)
+
+    def train(self):
+        # Load data
+        data_iter = self._load_array((self._features, self._labels), self._batch_size)
+
+        # print(next(iter(data_iter)))
+
+        # Define model
+        net = nn.Sequential(nn.Linear(2, 1))
+        net[0].weight.data.normal_(0, 0.01)
+        net[0].bias.data.fill_(0)
+
+        # Define loss function
+        # Creates a criterion that measures the mean squared error (squared L2 norm)
+        # between each element in the input x and target y.
+        loss = nn.MSELoss()
+
+        # Define optimizer
+        # Implements stochastic gradient descent (optionally with momentum).
+        trainer = optim.SGD(net.parameters(), lr=0.03)
+
+        # Training
+        num_epochs = 3
+        for epoch in range(num_epochs):
+            for x, y in data_iter:
+                l = loss(net(x), y)
+                trainer.zero_grad()
+                l.backward()
+                trainer.step()
+            l = loss(net(self._features), self._labels)
+            print(f'epoch {epoch + 1}, loss {l:f}')
+
+        w = net[0].weight.data
+        print('w loss: ', self._true_w - w.reshape(self._true_w.shape))
+        b = net[0].bias.data
+        print('bias loss: ', self._true_b - b)
+
+
 if __name__ == '__main__':
-    model = LinearNeuralNetworkNaive()
-    model.forward()
+    # model = LinearNeuralNetworkNaive()
+    # model.forward()
+
+    simple_torch_model = LinearNeuralNetworkSimple()
+    simple_torch_model.train()
