@@ -1,6 +1,7 @@
 data
 download.py
 images.csv
+.idea/
 test/
 train/
 val/
