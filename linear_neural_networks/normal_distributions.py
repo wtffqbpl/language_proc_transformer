@@ -7,6 +7,7 @@ import torch.utils.data as data
 import math
 import numpy as np
 import random
+import unittest
 
 import matplotlib
 matplotlib.use('TkAgg')
@@ -104,6 +105,8 @@ class LinearNeuralNetworkNaive:
         print(f'w loss: {true_w - w.reshape(true_w.shape)}')
         print(f'b loss: {true_b - b}')
 
+        return True
+
 
 class LinearNeuralNetworkSimple:
     def __init__(self):
@@ -159,10 +162,22 @@ class LinearNeuralNetworkSimple:
         b = net[0].bias.data
         print('bias loss: ', self._true_b - b)
 
+        return True
+
+
+class IntegrationTest(unittest.TestCase):
+
+    def test_naive_model(self):
+        model = LinearNeuralNetworkNaive()
+        res = model.forward()
+        self.assertTrue(res)
+
+    def test_simple_pytorch_model(self):
+        simple_torch_model = LinearNeuralNetworkSimple()
+        res = simple_torch_model.train()
+
+        self.assertTrue(res)
+
 
 if __name__ == '__main__':
-    # model = LinearNeuralNetworkNaive()
-    # model.forward()
-
-    simple_torch_model = LinearNeuralNetworkSimple()
-    simple_torch_model.train()
+    unittest.main(verbosity=True)
