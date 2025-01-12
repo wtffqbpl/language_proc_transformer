@@ -254,12 +254,13 @@ class MNISTSimple:
                 with torch.no_grad():
                     for param in params:
                         param -= lr * param.grad / bs
+                        param.grad.zero_()
 
             return sgd([w, b])
 
         num_epoch = 10
         batch_size = 256
-        train_iter, test_iter = self.data_iter(batch_size, resize=64)
+        train_iter, test_iter = self.data_iter(batch_size)
 
         self.train(net, train_iter, test_iter, cross_entropy, num_epoch, updater)
 
@@ -402,7 +403,13 @@ class IntegrationTest(unittest.TestCase):
         res = mnist_model.softmax_training_simple()
 
         self.assertTrue(res)
-        pass
+
+    def test_mnist_raw(self):
+        mnist_model = MNISTSimple()
+        res = mnist_model.train_test()
+
+        self.assertTrue(res)
+
 
 
 if __name__ == '__main__':
