@@ -174,6 +174,12 @@ class MNISTSimple:
     def __init__(self):
         pass
 
+    def get_fashion_labels(self, labels):
+        fashion_labels = ['T-shirt/top', 'Trouser', 'Pullover',
+                          'Dress', 'Coat', 'Sandal', 'Shirt',
+                          'Sneaker', 'Bag', 'Ankle boot']
+        return [fashion_labels[int(i)] for i in labels]
+
     def test(self):
         trans = transforms.ToTensor()
         self._mnist_train = torchvision.datasets.FashionMNIST(
@@ -186,8 +192,6 @@ class MNISTSimple:
         print(self._mnist_train.classes)
 
         # Show images
-        # def get_fashion_labels(labels):
-        #     return [self._mnist_train.classes[int(i)] for i in labels]
 
         # x, y = next(iter(data.DataLoader(self._mnist_train, batch_size=18)))
         # self.show_images(x.reshape(18, 28, 28), 2, 9, titles=get_fashion_labels(y))
@@ -262,7 +266,11 @@ class MNISTSimple:
         batch_size = 256
         train_iter, test_iter = self.data_iter(batch_size)
 
+        # Training
         self.train(net, train_iter, test_iter, cross_entropy, num_epoch, updater)
+
+        # Prediction
+        self.predict(net, test_iter)
 
         # x = torch.normal(0, 1, (2, 5))
         # x_prob = softmax(x)
@@ -356,7 +364,19 @@ class MNISTSimple:
 
         self.train(net, train_iter, test_iter, loss, num_epochs, trainer)
 
+        self.predict(net, test_iter)
+
         return True
+
+    def predict(self, net, test_iter, n=6):
+        x, y = None, None
+        for x, y in test_iter:
+            break
+
+        trues = self.get_fashion_labels(y)
+        preds = self.get_fashion_labels(net(x).argmax(dim=1))
+        titles = [true + '\n' + pred for true, pred in zip(trues, preds)]
+        self.show_images(x[0:n].reshape((n, 28, 28)), 1, n, titles=titles[0:n])
 
     def show_images(self, imgs, num_rows, num_cols, titles=None, scale=1.5):
         # Plot image list
@@ -404,12 +424,12 @@ class IntegrationTest(unittest.TestCase):
 
         self.assertTrue(res)
 
+
     def test_mnist_raw(self):
         mnist_model = MNISTSimple()
         res = mnist_model.train_test()
 
         self.assertTrue(res)
-
 
 
 if __name__ == '__main__':
