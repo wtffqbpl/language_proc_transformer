@@ -92,8 +92,28 @@ class MultiplayerPerceptronModel:
 
         print(features[:2], poly_features[:2, :], labels[:2])
 
-        self.polynomial_fitting(poly_features[:n_train, :4], poly_features[n_train:, :4],
-                                labels[:n_train], labels[n_train:])
+        # Normal fitting
+        weight = self.polynomial_fitting(poly_features[:n_train, :4],
+                                         poly_features[n_train:, :4],
+                                         labels[:n_train],
+                                         labels[n_train:])
+        print(f'weight: {weight}')
+
+        # under-fitting
+        weight = self.polynomial_fitting(poly_features[:n_train, :2],
+                                         poly_features[n_train:, :2],
+                                         labels[:n_train],
+                                         labels[n_train:])
+        print(f'weight: {weight}')
+
+        # over-fitting
+        weight = self.polynomial_fitting(poly_features[:n_train, :],
+                                         poly_features[n_train:, :],
+                                         labels[:n_train],
+                                         labels[n_train:],
+                                         num_epochs=1500)
+        print(f'weight: {weight}')
+
         return True
 
     def polynomial_fitting(self, train_features, test_features, train_labels, test_labels,
@@ -113,6 +133,9 @@ class MultiplayerPerceptronModel:
             if epoch == 0 or (epoch + 1) % 20 == 0:
                 print(f"{epoch + 1} iter: training_loss: {self.evaluate_loss(net, train_iter, loss)}, ",
                       f"test_loss: {self.evaluate_loss(net, test_iter, loss)}")
+
+        # Weight
+        return net[0].weight.detach().numpy()
 
     def load_array(self, data_arrays, batch_size, is_train=True):
         dataset = data.TensorDataset(*data_arrays)
@@ -217,6 +240,110 @@ class MultiplayerPerceptronModel:
                                 num_workers=self._dataloader_workers))
 
 
+class HighDimensionalPolynomialRegression:
+    def __init__(self):
+        self.n_train = 20
+        self.n_test = 100
+        self.num_inputs = 200
+        self.batch_size = 5
+        self.true_w = torch.ones((self.num_inputs, 1)) * 0.01
+        self.true_b = 0.05
+
+        # Training dataset
+        train_data = self.synthetic_data(self.true_w, self.true_b, self.n_train)
+        self.train_iter = self.load_array(train_data, self.batch_size)
+
+        # Inference dataset
+        test_data = self.synthetic_data(self.true_w, self.true_b, self.n_test)
+        self.test_iter = self.load_array(test_data, self.batch_size, is_train=False)
+
+    def train(self, lambd):
+        w, b = self.init_params()
+        net = lambda X: self.linreg(X, w, b)
+        loss = self.squared_loss
+        num_epochs, lr = 100, 0.003
+
+        for epoch in range(num_epochs):
+            for x, y in self.train_iter:
+                # Add L2 norm penalty
+                l = loss(net(x), y) + lambd * self.l2_penalty(w)
+                l.sum().backward()
+                self.sgd([w, b], lr, self.batch_size)
+
+            if (epoch + 1) % 5 == 0:
+                print(f'train_loss: {self.evaluate_loss(net, self.train_iter, loss)}',
+                      f'test_loss: {self.evaluate_loss(net, self.test_iter, loss)}')
+
+        # print('The W L2 norm: ', torch.norm(w).item())
+        return torch.norm(w).item()
+
+    def train_concise(self, wd):
+        net = nn.Sequential(nn.Linear(self.num_inputs, 1))
+
+        for param in net.parameters():
+            param.data.normal_()
+
+        loss = nn.MSELoss(reduction='none')
+        num_epochs, lr = 100, 0.003
+
+        trainer = torch.optim.SGD([
+            {'params': net[0].weight, 'weight_decay': wd},
+            {'params': net[0].bias}], lr=lr)
+
+        for epoch in range(num_epochs):
+            for x, y in self.train_iter:
+                trainer.zero_grad()
+                l = loss(net(x), y)
+                l.mean().backward()
+                trainer.step()
+                if (epoch + 1) % 5 == 0:
+                    print(f'Epoch = {epoch + 1}: train_loss = {self.evaluate_loss(net, self.train_iter, loss)}, ',
+                          f'test_loss = {self.evaluate_loss(net, self.test_iter, loss)}')
+
+        return net[0].weight.norm().item()
+
+    def init_params(self):
+        w = torch.normal(0, 1, size=(self.num_inputs, 1), requires_grad=True)
+        b = torch.zeros(1, requires_grad=True)
+        return [w, b]
+
+    def evaluate_loss(self, net, data_iter, loss):
+        metric = Accumulator(2)
+
+        for x, y in data_iter:
+            out = net(x)
+            y = y.reshape(out.shape)
+            l = loss(out, y)
+            metric.add(l.sum(), l.numel())
+
+        return metric[0] / metric[1]
+
+    def sgd(self, params, lr, batch_size):
+        with torch.no_grad():
+            for param in params:
+                param -= lr * param.grad / batch_size
+                param.grad.zero_()
+
+    def l2_penalty(self, w):
+        return torch.sum(w.pow(2)) / 2
+
+    def linreg(self, x: torch.Tensor, w: torch.Tensor, b: torch.Tensor):
+        return torch.matmul(x, w) + b
+
+    def squared_loss(self, y_hat, y):
+        return (y_hat - y.reshape(y_hat.shape)) ** 2 / 2
+
+    def synthetic_data(self, w, b, num_examples):
+        x = torch.normal(0, 1, (num_examples, len(w)))
+        y = torch.matmul(x, w) + b
+        y += torch.normal(0, 0.01, y.shape)
+        return x, y.reshape(-1, 1)
+
+    def load_array(self, data_array, batch_size, is_train=True):
+        dataset = data.TensorDataset(*data_array)
+        return data.DataLoader(dataset, batch_size, shuffle=is_train)
+
+
 class IntegrationTest(unittest.TestCase):
 
     def test_relu_function(self):
@@ -292,6 +419,27 @@ class IntegrationTest(unittest.TestCase):
         res = model.train_polynomial_fitting()
 
         self.assertTrue(res)
+
+    def test_weight_decay(self):
+        model = HighDimensionalPolynomialRegression()
+        norm = model.train(lambd=0)
+        print('lambda = 0: The W L2 norm: ', norm)
+
+        norm = model.train(lambd=3)
+        print('lambda = 3: The W L2 norm: ', norm)
+
+        self.assertTrue(True)
+
+    def test_weight_decay_concise(self):
+        model = HighDimensionalPolynomialRegression()
+
+        norm = model.train_concise(wd=0)
+        print('lambda = 0: The W L2 norm: ', norm)
+
+        norm = model.train_concise(wd=3)
+        print('lambda = 0: The W L2 norm: ', norm)
+
+        self.assertTrue(True)
 
 
 if __name__ == '__main__':
