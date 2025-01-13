@@ -58,4 +58,5 @@ def plot(x, y=None, xlabel=None, ylabel=None, legend=None, xlim=None, ylim=None,
             axes.plot(ay, afmt)
 
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
+    plt.show()
 
