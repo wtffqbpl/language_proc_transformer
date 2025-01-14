@@ -344,6 +344,143 @@ class HighDimensionalPolynomialRegression:
         return data.DataLoader(dataset, batch_size, shuffle=is_train)
 
 
+class DropoutModel(nn.Module):
+    # Dropout 在前向传播过程中，计算每一内部层的同时丢弃一些神经元
+    # Dropout 可以避免过拟合，它通常与控制权重向量的维数和大小结合使用
+    # Dropout 尽在训练期间使用
+    def __init__(self, is_training=True):
+        super(DropoutModel, self).__init__()
+
+        self.num_inputs = 784
+        self.num_outputs = 10
+        self.num_hiddens1 = 256
+        self.num_hiddens2 = 256
+        self.training = is_training
+        self.dropout1 = 0.2
+        self.dropout2 = 0.5
+
+        self.lin1 = nn.Linear(self.num_inputs, self.num_hiddens1)
+        self.lin2 = nn.Linear(self.num_hiddens1, self.num_hiddens2)
+        self.lin3 = nn.Linear(self.num_hiddens2, self.num_outputs)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        h1 = self.relu(self.lin1(x.reshape(-1, self.num_inputs)))
+        # 只有在训练模型的时候才使用暂退法
+        if self.training:
+            # 在第一个全连接层之后添加一个暂退层
+            h1 = self.dropout_layer(h1, self.dropout1)
+        h2 = self.relu(self.lin2(h1))
+        if self.training:
+            # 在第二个全连接层之后添加一个暂退层
+            h2 = self.dropout_layer(h2, self.dropout2)
+        out = self.lin3(h2)
+        return out
+
+    def test(self):
+        # x = torch.arange(16, dtype=torch.float32).reshape((2, 8))
+        # print(x)
+        # print(self.dropout_layer(x, 0))
+        # print(self.dropout_layer(x, 0.5))
+        # print(self.dropout_layer(x, 1))
+        pass
+
+    def dropout_layer(self, x, dropout):
+        assert 0 <= dropout <= 1
+
+        #  在本情况下，所有元素都被丢弃
+        if dropout == 1:
+            return torch.zeros_like(x)
+
+        if dropout == 0:
+            return x
+
+        mask = (torch.rand(x.shape) > dropout).float()
+
+        return mask * x / (1.0 - dropout)
+
+
+def get_dataloader_workers():
+    return 4
+
+
+def load_fashion_mnist(batch_size, resize=None):
+    # Download Fashion-MNIST dataset, and load it into memory
+    trans = [transforms.ToTensor()]
+
+    if resize:
+        trans.insert(0, transforms.Resize(resize))
+    trans = transforms.Compose(trans)
+
+    mnist_train = torchvision.datasets.FashionMNIST(
+        root='../data', train=True, transform=trans, download=True)
+    mnist_test = torchvision.datasets.FashionMNIST(
+        root='../data', train=False, transform=trans, download=True)
+
+    return (data.DataLoader(mnist_train, batch_size, shuffle=True,
+                            num_workers=get_dataloader_workers()),
+            data.DataLoader(mnist_test, batch_size, shuffle=False,
+                            num_workers=get_dataloader_workers()))
+
+
+def accuracy(y_hat: torch.Tensor, y: torch.Tensor) -> float:
+    if len(y_hat.shape) > 1 and y_hat.shape[1] > 1:
+        y_hat = y_hat.argmax(dim=1)
+
+    cmp = y_hat.type(y.dtype) == y
+    return float(cmp.to(y.dtype).sum())
+
+
+def train_epoch(net, train_iter, loss, updater):
+    # Set model to training state
+    if isinstance(net, torch.nn.Module):
+        net.train()
+
+    # Training
+    metric = Accumulator(3)
+    for x, y in train_iter:
+        y_hat = net(x)
+        l = loss(y_hat, y)
+
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.mean().backward()
+            updater.step()
+        else:
+            l.sum().backward()
+            updater(x.shape[0])
+        metric.add(float(l.sum()), accuracy(y_hat, y), y.numel())
+
+    return metric[0] / metric[2], metric[1] / metric[2]
+
+
+def evaluate_accuracy(net, data_iter) -> float:
+    if isinstance(net, torch.nn.Module):
+        net.eval()
+
+    metric = Accumulator(2)
+    with torch.no_grad():
+        for x, y in data_iter:
+            metric.add(accuracy(net(x), y), y.numel())
+
+    return metric[0] / metric[1]
+
+
+def train(net, train_iter, test_iter, loss, num_epochs, updater):
+    train_loss, train_acc, test_acc = 0.0, 0.0, 0.0
+    for epoch in range(num_epochs):
+        train_loss, train_acc = train_epoch(net, train_iter, loss, updater)
+        test_acc = evaluate_accuracy(net, test_iter)
+
+        print(f'The {epoch + 1} training: train loss: {train_loss}, '
+              f'train accuracy: {train_acc}, ',
+              f'test accuracy: {test_acc}')
+
+    assert train_loss < 0.5, train_loss
+    assert 1 >= train_acc > 0.7, train_acc
+    assert 1 >= test_acc > 0.7, test_acc
+
+
 class IntegrationTest(unittest.TestCase):
 
     def test_relu_function(self):
@@ -438,6 +575,50 @@ class IntegrationTest(unittest.TestCase):
 
         norm = model.train_concise(wd=3)
         print('lambda = 0: The W L2 norm: ', norm)
+
+        self.assertTrue(True)
+
+    def test_dropout_model(self):
+        num_epochs, lr, batch_size = 10, 0.5, 256
+        loss = nn.CrossEntropyLoss(reduction='none')
+        train_iter, test_iter = load_fashion_mnist(batch_size)
+        net = DropoutModel()
+        trainer = torch.optim.SGD(net.parameters(), lr=lr)
+        train(net, train_iter, test_iter, loss, num_epochs, trainer)
+
+        self.assertTrue(True)
+        pass
+
+    def test_dropout_model_concise(self):
+        num_inputs, num_outputs, num_hiddens1, num_hiddens2 = 784, 10, 256, 256
+        dropout1, dropout2 = 0.2, 0.5
+        num_epochs, lr, batch_size = 10, 0.5, 256
+
+        net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(num_inputs, num_hiddens1),
+            nn.ReLU(),
+            # Add a dropout layer after the first fully connected layer
+            nn.Dropout(dropout1),
+            nn.Linear(num_hiddens1, num_hiddens2),
+            nn.ReLU(),
+            # Add a dropout layer after the second fully connected layer
+            nn.Dropout(dropout2),
+            nn.Linear(num_hiddens2, num_outputs),
+        )
+
+        def init_weights(m):
+            if type(m) == nn.Linear:
+                nn.init.normal_(m.weight, std=0.01)
+
+        net.apply(init_weights)
+
+        loss = nn.CrossEntropyLoss(reduction='none')
+
+        train_iter, test_iter = load_fashion_mnist(batch_size)
+
+        trainer = torch.optim.SGD(net.parameters(), lr=lr)
+        train(net, train_iter, test_iter, loss, num_epochs, trainer)
 
         self.assertTrue(True)
 
