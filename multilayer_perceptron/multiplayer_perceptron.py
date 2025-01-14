@@ -622,6 +622,26 @@ class IntegrationTest(unittest.TestCase):
 
         self.assertTrue(True)
 
+    def test_sigmoid_loss(self):
+        x = torch.arange(-8.0, 8.0, 0.1, requires_grad=True)
+        y = torch.sigmoid(x)
+        y.backward(torch.ones_like(x))
+
+        plot(x.detach().numpy(), [y.detach().numpy(), x.grad.numpy()],
+             legend=['sigmoid', 'gradient'], figsize=(4.5, 2.5))
+
+        self.assertTrue(True)
+
+    def test_gradient_exploding(self):
+        m = torch.normal(0, 1, size=(4, 4))
+        print('A tensor:\n', m)
+        for i in range(100):
+            m = torch.mm(m, torch.normal(0, 1, size=(4, 4)))
+
+        print('After 100 tensors multiplication:\n', m)
+
+        self.assertTrue(True)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=True)
