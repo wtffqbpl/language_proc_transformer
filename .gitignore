@@ -2,6 +2,9 @@ data
 download.py
 images.csv
 .idea/
+.DS_Store
+__pycache__/
+*.csv
 test/
 train/
 val/

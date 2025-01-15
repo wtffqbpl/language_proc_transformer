@@ -50,7 +50,7 @@ class HousePricePrediction:
         n_train = self.train_data.shape[0]
         print(n_train)
         self.train_features = torch.from_numpy(all_features[:n_train].values.astype(float)).to(dtype=torch.float32)
-        test_features = torch.from_numpy(all_features[n_train:].values.astype(float)).to(dtype=torch.float32)
+        self.test_features = torch.from_numpy(all_features[n_train:].values.astype(float)).to(dtype=torch.float32)
         self.train_labels = torch.from_numpy(self.train_data.SalePrice.values.reshape(-1, 1)).to(dtype=torch.float32)
 
         self.loss = nn.MSELoss()
@@ -135,10 +135,34 @@ class HousePricePrediction:
         print(f'{k}-fold validation: average traing log rmse: {float(train_l):f}, ',
               f'average testing log rmse: {float(valid_l):f}')
 
+    def train_and_pred(self):
+        num_epochs, lr, weight_decay, batch_size = 100, 5, 0, 64
+        net = self.get_net()
+        train_ls, _ = self.train(net, self.loss, self.train_features, self.train_labels, None, None, num_epochs,
+                                 lr, weight_decay, batch_size)
+
+        plot(np.arange(1, num_epochs + 1),
+             [train_ls],
+             xlabel='epoch',
+             ylabel='log rmse',
+             xlim=[1, num_epochs],
+             yscale='log')
+        print(f'Training los rmse: {float(train_ls[-1]):f}, ')
+
+        # Inference
+        preds = net(self.test_features).detach().numpy()
+
+        # Format torch.Tensor datatype to numpy for Kaggle
+        self.test_data['SalePrice'] = pd.Series(preds.flatten())
+        submission = pd.concat([self.test_data['Id'], self.test_data['SalePrice']], axis=1)
+        submission.to_csv('submission.csv', index=False)
+
 
 if __name__ == "__main__":
     model = HousePricePrediction()
 
     model.train_wrapper()
+
+    model.train_and_pred()
 
     pass
