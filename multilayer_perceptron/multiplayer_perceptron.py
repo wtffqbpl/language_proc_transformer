@@ -7,6 +7,10 @@ import torch.nn as nn
 import numpy as np
 from torch.utils import data
 import torchvision
+
+import sys
+sys.path.append('../')
+
 from torchvision import transforms
 from utils.plot import plot
 from utils.accumulator import Accumulator
