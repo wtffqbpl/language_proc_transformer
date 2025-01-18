@@ -111,9 +111,10 @@ class HousePricePrediction:
 
     def k_fold(self, k, x_train, y_train, num_epochs, learning_rate, weight_decay, batch_size):
         train_l_sum, valid_l_sum = 0, 0
+        net = self.get_net()
+
         for i in range(k):
             k_data = self.get_k_fold_data(k, i, x_train, y_train)
-            net = self.get_net()
             train_ls, valid_ls = self.train(net, self.loss, *k_data, num_epochs, learning_rate, weight_decay, batch_size)
             train_l_sum += train_ls[-1]
             valid_l_sum += valid_ls[-1]
