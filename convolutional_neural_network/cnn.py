@@ -15,6 +15,25 @@ def corr2d(x, k):
     return y
 
 
+def corr2d_multi_in(xs, ks):
+    return sum(corr2d(x, k) for x, k in zip(xs, ks))
+
+
+def corr2d_multi_in_out(xs, ks):
+    return torch.stack([corr2d_multi_in(xs, k) for k in ks], 0)
+
+
+def corr2d_multi_in_out_1x1(xs, ks):
+    c_i, h, w = xs.shape
+    c_o = ks.shape[0]
+
+    xs = xs.reshape((c_i, h * w))
+    ks = ks.reshape((c_o, c_i))
+
+    y = torch.matmul(ks, xs)
+    return y.reshape((c_o, h, w))
+
+
 class Conv2D(nn.Module):
     # A convolutional layer cross-correlates the input and kernel and adds a scalar bias to
     # produce an output. The two parameters of a convolutional layer are the kernel and the
@@ -231,6 +250,45 @@ class IntegrationTest(unittest.TestCase):
         # this case we refer to (p_h, p_w) padding. Most commonly we set p_h == p_w, in which case
         # we simply state that we choose padding p.
         # The stride can reduce the resolution of the output.
+
+    def test_corr2d_multi_channels(self):
+        x = torch.tensor([
+            [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]],
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
+        ])
+        k = torch.tensor([
+            [[0.0, 1.0], [2.0, 3.0]],
+            [[1.0, 2.0], [3.0, 4.0]]])
+
+        res = corr2d_multi_in(x, k)
+        print(res)
+        self.assertEqual(res.shape, (2, 2))
+
+        k = torch.stack((k, k + 1, k + 2), 0)
+        print(k.shape)
+        res = corr2d_multi_in_out(x, k)
+        print(res)
+        self.assertEqual(res.shape, (3, 2, 2))
+        pass
+
+    def test_corr2d_multi_1x1(self):
+        x = torch.normal(0, 1, (3, 3, 3))
+        k = torch.normal(0, 1, (3, 3, 1, 1))
+
+        y1 = corr2d_multi_in_out_1x1(x, k)
+        y2 = corr2d_multi_in_out(x, k)
+
+        self.assertTrue(torch.allclose(y1, y2))
+
+
+# Channels allow us to combine the best of both worlds:
+#   * MLPs that allow for significant nonlinearities and,
+#   * convolutions that allow for localized analysis of features.
+#   * In particular, channels allow the CNN to reason with multiple features, such as
+#     edge and shape detectors at the same time.
+#   * They also offer a practical trade-off between the drastic parameter reduction
+#     arising from translation invariance and locality, and the need for expressive
+#     and diverse models in computer vision.
 
 
 if __name__ == '__main__':
