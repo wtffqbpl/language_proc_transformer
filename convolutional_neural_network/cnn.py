@@ -280,6 +280,18 @@ class IntegrationTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(y1, y2))
 
+    def test_corr2d_new(self):
+        x = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
+
+        output_h = ((28 + 2 * 2 - (5 - 1) - 1) / 1 + 1)
+        output_w = ((28 + 2 * 2 - (5 - 1) - 1) / 1 + 1)
+
+        net = nn.LazyConv2d(6, kernel_size=5, padding=2)
+
+        y = net(x)
+        print(y.shape)
+        print(output_h, output_w)
+
 
 # Channels allow us to combine the best of both worlds:
 #   * MLPs that allow for significant nonlinearities and,
