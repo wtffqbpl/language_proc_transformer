@@ -55,6 +55,34 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
     return metric[0] / metric[1]
 
 
+class LeNet5(nn.Module):
+    def __init__(self):
+        super(LeNet5, self).__init__()
+
+        self.net = nn.Sequential(
+            # Convolutional Neural Layers
+            nn.Conv2d(1, 6, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            nn.Flatten(),
+            # Multilayer Perceptron Layers
+            nn.Linear(16 * 5 * 5, 120),
+            nn.Sigmoid(),
+            nn.Linear(120, 84),
+            nn.Sigmoid(),
+            nn.Linear(84, 10)
+            # No need to use softmax activation function since we are using CrossEntropyLoss as loss function which
+            # includes log-softmax activation function.
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class LeNet(nn.Module):
 
     def __init__(self):
@@ -161,6 +189,76 @@ class IntegrationTest(unittest.TestCase):
 
         self.assertTrue(True)
 
+    def test_lenet_model_standard(self):
+        batch_size = 64
+        learning_rate = 0.001
+        num_epochs = 10
+
+        # Transformations for the training and testing data
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+
+        # Load the MNIST dataset
+        train_dataset = torchvision.datasets.FashionMNIST(
+            root='../data', train=True, transform=transform, download=True)
+        test_dataset = torchvision.datasets.FashionMNIST(
+            root='../data', train=False, transform=transform, download=True)
+
+        train_loader = data.DataLoader(
+            dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+        test_loader = data.DataLoader(
+            dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+        model = LeNet5()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+        # Training loop
+        for epoch in range(num_epochs):
+            model.train()
+            running_loss = 0.0
+
+            for i, (images, labels) in enumerate(train_loader):
+                # Zero the parameter gradients
+                optimizer.zero_grad()
+
+                # Forward pass
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+
+                # backward pass and optimization
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item()
+
+                if (i + 1) % 100 == 0:
+                    print(f'Epoch [{epoch + 1} / {num_epochs}], ',
+                          f'Step [{i + 1} / {len(train_loader)}], ',
+                          f'Loss: {loss.item():.4f}')
+            print(f'Epoch [{epoch + 1} / {num_epochs}], ',
+                  f'Loss: {running_loss / len(train_loader):.4f}')
+
+        # Evaluation loop
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels in test_loader:
+                outputs = model(images)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+        print(f'Accuracy of the network on the 10000 test images: {100 * correct / total}%')
+
+        # Save the model checkpoint
+        torch.save(model.state_dict(), 'lenet5_mnist.pth')
+
 
 if __name__ == '__main__':
+    unittest.main(verbosity=2)
     pass
