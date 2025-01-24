@@ -56,28 +56,80 @@ def evaluate_accuracy_gpu(net, data_iter, device=None):
 
 
 class LeNet5(nn.Module):
-    def __init__(self):
+    def __init__(self, device=torch.device('cpu')):
         super(LeNet5, self).__init__()
 
         self.net = nn.Sequential(
             # Convolutional Neural Layers
+            # A convolutional neural layer with single input channel, 6 output channels,
+            # and a 5x5 kernel.
             nn.Conv2d(1, 6, kernel_size=5, padding=2),
             nn.ReLU(),
+            # An average pooling layer with 2x2 kernel and stride of 2.
             nn.AvgPool2d(kernel_size=2, stride=2),
+            # A convolutional neural layer with 6 input channels, 16 output channels,
+            # and a 5x5 kernel.
             nn.Conv2d(6, 16, kernel_size=5),
             nn.ReLU(),
+            # An average pooling layer with a 2x2 kernel and stride of 2.
             nn.AvgPool2d(kernel_size=2, stride=2),
 
             nn.Flatten(),
             # Multilayer Perceptron Layers
+            # A fully connected layer with 16x4x4 input features and 120 output features.
             nn.Linear(16 * 5 * 5, 120),
             nn.Sigmoid(),
+            # A fully connected layer with 120 input features and 84 output features.
             nn.Linear(120, 84),
             nn.Sigmoid(),
+            # A fully connected layer with 84 input features and 10 output features
+            # for 10 classes in Fashion-MNIST dataset.
             nn.Linear(84, 10)
             # No need to use softmax activation function since we are using CrossEntropyLoss as loss function which
             # includes log-softmax activation function.
-        )
+        ).to(device)
+
+        # Saved parameters in each layer:
+        # Each layer in PyTorch has two types of learnable parameters:
+        #   1. **Weights**: The kernel weights for convolutional layers or the weight matrix for
+        #      fully connected layers.
+        #   2. **Bias**: The bias terms added to the output of each layer.
+        # Here's the list of saved parameters for each layer:
+        #   1. Conv layer:
+        #       Weights: conv1.weight.
+        #            Shape: (6, 1, 5, 5) -> 6 output channels, 1 input channel, 5x5 kernel
+        #       Bias: conv1.bias
+        #            shape: (6,) -> One bias term for each of the 6 output channels
+        #   2. Conv2 layer:
+        #       Weights: conv2.weight
+        #           Shape: (16, 6, 5, 5) -> 16 output channels, 6 input channel, 5x5 kernel
+        #       Bias: conv2.bias
+        #           Shape: (16,) -> One bias term for each of the 16 output channels
+        #   3. FC1 layer:
+        #       Weights: fc1.weight
+        #           Shape: (120, 256) -> 120 output features, 256 input features (16 * 4 * 4 = 256)
+        #        Bias: fc1.bias
+        #           Shape: (120, ) -> One bias term for each of the 120 output features.
+        #   4. FC2 layer:
+        #       Weights: fc2.weight
+        #          Shape: (84, 120) -> 84 output features, 120 input features
+        #       Bias: fc2.bias
+        #          Shape: (84,) -> One bias term for each of the 84 output features
+        #   5. FC3 layer:
+        #       Weights: fc3.weight
+        #          Shape: (10, 84) -> 10 output features (for 10 classes), 84 input features.
+        #       Bias: fc3.bias
+        #          Shape (10,) -> One bias term for each of the 10 output features
+        #
+        # Total Number of Parameters
+        # To calculate the total number of parameters in the model, you can sum the
+        # number of weights and biases for each layer:
+        # 1. Conv1: weights(6 * 1 * 5 * 5) + biases(6) = 156
+        # 2. Conv2: weights(16 * 6 * 5 * 5) + biases(16) = 2416
+        # 3. FC1: weights(120 * 256) + biases(120) = 30840
+        # 4. FC2: weights(84 * 120) + biases(84) = 10164
+        # 5. FC3: weights(10 * 84) + biases(10) = 850
+        # Total parameters: 156 + 2416 + 30840 + 10164 + 850 = 44,426
 
     def forward(self, x):
         return self.net(x)
@@ -192,7 +244,8 @@ class IntegrationTest(unittest.TestCase):
     def test_lenet_model_standard(self):
         batch_size = 64
         learning_rate = 0.001
-        num_epochs = 10
+        # num_epochs = 10
+        num_epochs = 1
 
         # Transformations for the training and testing data
         transform = transforms.Compose([
@@ -211,8 +264,9 @@ class IntegrationTest(unittest.TestCase):
         test_loader = data.DataLoader(
             dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-        model = LeNet5()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        model = LeNet5(device=device)
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -258,7 +312,42 @@ class IntegrationTest(unittest.TestCase):
         # Save the model checkpoint
         torch.save(model.state_dict(), 'lenet5_mnist.pth')
 
+        # Accessing saved parameters:
+
+        # Load the saved model parameters
+        checkpoint = torch.load('lenet5_mnist.pth')
+
+        # Print the keys (parameter names) in the checkpoint
+        print(checkpoint.keys())
+        # odict_keys([
+        #   'net.0.weight',
+        #   'net.0.bias',
+        #   'net.3.weight',
+        #   'net.3.bias',
+        #   'net.7.weight',
+        #   'net.7.bias',
+        #   'net.9.weight',
+        #   'net.9.bias',
+        #   'net.11.weight',
+        #   'net.11.bias'])
+
+        # Access specific parameters
+        conv1_weights = checkpoint['net.0.weight']
+        conv1_bias = checkpoint['net.0.bias']
+        fc3_weight = checkpoint['net.11.weight']
+        fc3_bias = checkpoint['net.11.bias']
+
+        print(f'Conv1 Weights Shape: {conv1_weights.shape}')
+        print(f'Conv1 Bias Shape: {conv1_bias.shape}')
+        print(f'FC3 Weights Shape: {fc3_weight.shape}')
+        print(f'FC3 Bias Shape: {fc3_bias.shape}')
+
+        self.assertEqual(conv1_weights.shape, (6, 1, 5, 5))
+        self.assertEqual(conv1_bias.shape, (6,))
+        self.assertEqual(fc3_weight.shape, (10, 84))
+        self.assertEqual(fc3_bias.shape, (10,))
+
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=True)
     pass
