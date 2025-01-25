@@ -1,6 +1,6 @@
 torch~=2.5.1
 torchvision~=0.20.1
-requests~=2.31.0
+requests>=2.31.0
 numpy~=1.23.5
 matplotlib~=3.7.2
 ipython~=8.30.0
