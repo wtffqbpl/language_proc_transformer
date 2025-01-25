@@ -52,8 +52,6 @@ class AlexNet(nn.Module):
             nn.LazyLinear(10)
         )
 
-        # self.net.apply(init_weights)
-
     def forward(self, x):
         return self.net(x)
 
@@ -74,7 +72,7 @@ def train(device):
     x = torch.randn(1, 1, 224, 224).to(device)
     _ = net(x)
 
-    net.get().apply(init_weights)
+    net.apply(init_weights)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(net.parameters(), lr=learning_rate)

@@ -1,17 +1,21 @@
 #! coding: utf-8
 
-
 import unittest
+from unittest.mock import patch
+import sys
+from io import StringIO
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+import torchinfo
 import torchvision
 from torchvision import transforms
+import torchsummary
 
 
 class VggBlock(nn.Module):
-    def __init__(self, out_channels, num_convs):
+    def __init__(self, num_convs, out_channels):
         super(VggBlock, self).__init__()
 
         layers = []
@@ -27,14 +31,14 @@ class VggBlock(nn.Module):
 
 
 class Vgg(nn.Module):
-    def __init__(self):
+    def __init__(self, ratio=1):
         super(Vgg, self).__init__()
         conv_arch = ((1, 64), (1, 128), (2, 256), (2, 512), (2, 512))
 
         layers = []
 
         for num_convs, out_channels in conv_arch:
-            layers.append(VggBlock(out_channels, num_convs))
+            layers.append(VggBlock(num_convs, out_channels // ratio))
 
         self.net = nn.Sequential(*layers, nn.Flatten(),
                                  nn.LazyLinear(4096), nn.ReLU(), nn.Dropout(p=0.5),
@@ -78,11 +82,11 @@ def train(device=torch.device('cpu')):
     num_epochs = 10
 
     # define model
-    net = Vgg()
+    net = Vgg(4)  # set ratio to 4 since fashion mnist images are small
     net.to(device)
 
     # Dummy initialization for LazyConv2d
-    _ = net(torch.rand(1, 1, 224, 224))
+    _ = net(torch.rand(1, 1, 224, 224).to(device))
 
     # apply initialization method to the model
     net.apply(init_model)
@@ -133,6 +137,73 @@ class IntegrationTest(unittest.TestCase):
             print(layer.__class__.__name__, 'output shape:\t', x.shape)
 
         self.assertEqual(x.shape, torch.Size([1, 10]))
+
+    def test_vgg_arch_with_summary(self):
+        model = Vgg()
+
+        # Testing
+        output = None
+        with patch('sys.stdout', new_callable=StringIO) as log:
+            torchsummary.summary(model, (1, 224, 224))
+            output = log.getvalue().strip()
+
+        print(output)
+
+        expected_output = """
+----------------------------------------------------------------
+        Layer (type)               Output Shape         Param #
+================================================================
+            Conv2d-1         [-1, 64, 224, 224]             640
+              ReLU-2         [-1, 64, 224, 224]               0
+         MaxPool2d-3         [-1, 64, 112, 112]               0
+          VggBlock-4         [-1, 64, 112, 112]               0
+            Conv2d-5        [-1, 128, 112, 112]          73,856
+              ReLU-6        [-1, 128, 112, 112]               0
+         MaxPool2d-7          [-1, 128, 56, 56]               0
+          VggBlock-8          [-1, 128, 56, 56]               0
+            Conv2d-9          [-1, 256, 56, 56]         295,168
+             ReLU-10          [-1, 256, 56, 56]               0
+           Conv2d-11          [-1, 256, 56, 56]         590,080
+             ReLU-12          [-1, 256, 56, 56]               0
+        MaxPool2d-13          [-1, 256, 28, 28]               0
+         VggBlock-14          [-1, 256, 28, 28]               0
+           Conv2d-15          [-1, 512, 28, 28]       1,180,160
+             ReLU-16          [-1, 512, 28, 28]               0
+           Conv2d-17          [-1, 512, 28, 28]       2,359,808
+             ReLU-18          [-1, 512, 28, 28]               0
+        MaxPool2d-19          [-1, 512, 14, 14]               0
+         VggBlock-20          [-1, 512, 14, 14]               0
+           Conv2d-21          [-1, 512, 14, 14]       2,359,808
+             ReLU-22          [-1, 512, 14, 14]               0
+           Conv2d-23          [-1, 512, 14, 14]       2,359,808
+             ReLU-24          [-1, 512, 14, 14]               0
+        MaxPool2d-25            [-1, 512, 7, 7]               0
+         VggBlock-26            [-1, 512, 7, 7]               0
+          Flatten-27                [-1, 25088]               0
+           Linear-28                 [-1, 4096]     102,764,544
+             ReLU-29                 [-1, 4096]               0
+          Dropout-30                 [-1, 4096]               0
+           Linear-31                 [-1, 4096]      16,781,312
+             ReLU-32                 [-1, 4096]               0
+          Dropout-33                 [-1, 4096]               0
+           Linear-34                   [-1, 10]          40,970
+================================================================
+Total params: 128,806,154
+Trainable params: 128,806,154
+Non-trainable params: 0
+----------------------------------------------------------------
+Input size (MB): 0.19
+Forward/backward pass size (MB): 137.04
+Params size (MB): 491.36
+Estimated Total Size (MB): 628.59
+----------------------------------------------------------------
+        """
+        self.assertEqual(expected_output.strip(), output)
+
+    def test_vgg_arch_with_torchinfo(self):
+        model = Vgg()
+        torchinfo.summary(model, (1, 1, 224, 224))
+        self.assertTrue(True)
 
     def test_vgg_model(self):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
