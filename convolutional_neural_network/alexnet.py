@@ -3,7 +3,6 @@
 import unittest
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
 import torchvision
@@ -66,12 +65,12 @@ def train(device):
     # hyperparameters
     batch_size = 64
     learning_rate = 0.001
-    num_workers = 4
     num_epochs = 10
 
     net = AlexNet()
     net.to(device)
 
+    # To initialize the network.
     x = torch.randn(1, 1, 224, 224).to(device)
     _ = net(x)
 
