@@ -77,8 +77,8 @@ def init_model(m):
 
 def train(device=torch.device('cpu')):
     # hyperparameters
-    batch_size = 64
-    learning_rate = 0.05
+    batch_size = 256
+    learning_rate = 0.001
     num_epochs = 10
 
     # define model
@@ -110,8 +110,8 @@ def train(device=torch.device('cpu')):
             loss.backward()
             optimizer.step()
 
-            if i % 100 == 0:
-                print(f'epoch {epoch+1}, iteration {i}, loss {loss.item()}')
+            if i % 20 == 0:
+                print(f'epoch {epoch+1}, iteration {i}, loss {loss.item():.5f}')
 
         # evaluation
         net.eval()
