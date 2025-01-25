@@ -135,6 +135,23 @@ class LeNet5(nn.Module):
         return self.net(x)
 
 
+def register_hooks(model: nn.Module):
+    def hook_fn(module, input, output):
+        print(f"Layer: {module.__class__.__name__}")
+        print(f"Input Shape: {[tuple(i.shape) for i in input]}")
+        print(f"Output Shape: {tuple(output.shape)}")
+        print("-" * 40)
+
+    # Register hooks for all layers
+    for layer in model.children():
+        layer.register_forward_hook(hook_fn)
+
+
+class Reshape(nn.Module):
+    def forward(self, x):
+        return x.view(-1, 1, 28, 28)
+
+
 class LeNet(nn.Module):
 
     def __init__(self):
@@ -142,10 +159,11 @@ class LeNet(nn.Module):
 
         # Define LeNet model
         self.net = nn.Sequential(
+            Reshape(),
             # Convolutional block
             # output_shape = ((28 + 2 * 2 - (5 - 1) - 1) / 1 + 1) * ((28 + 2 * 2 - (5 - 1) - 1) / 1 + 1) = 28 * 28
             # batch_size = 1, channels = 6
-            nn.Conv2d(1, 6, kernel_size=5, padding=2),
+            nn.LazyConv2d(out_channels=6, kernel_size=5, padding=2),
             nn.Sigmoid(),
             # output_shape floor((28 - 2) / 2 + 1) * floor((28 - 2) / 2 + 1) = 14 * 14
             nn.AvgPool2d(kernel_size=2, stride=2),
@@ -226,10 +244,9 @@ class IntegrationTest(unittest.TestCase):
 
         """
         x = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
-
-        for layer in model.get():
-            x_ = layer(x)
-            print(layer.__class__.__name__, 'output shape: \t', x_.shape)
+        for layer in model.net:
+            x = layer(x)
+            print(layer.__class__.__name__, 'output shape: \t', x.shape)
         """
 
         batch_size = 256
@@ -244,8 +261,8 @@ class IntegrationTest(unittest.TestCase):
     def test_lenet_model_standard(self):
         batch_size = 64
         learning_rate = 0.001
-        # num_epochs = 10
-        num_epochs = 1
+        num_epochs = 10
+        # num_epochs = 1
 
         # Transformations for the training and testing data
         transform = transforms.Compose([
@@ -267,6 +284,9 @@ class IntegrationTest(unittest.TestCase):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         model = LeNet5(device=device)
+        # Register hooks to print shapes
+        # register_hooks(model)
+
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -315,7 +335,7 @@ class IntegrationTest(unittest.TestCase):
         # Accessing saved parameters:
 
         # Load the saved model parameters
-        checkpoint = torch.load('lenet5_mnist.pth')
+        checkpoint = torch.load('lenet5_mnist.pth', weights_only=True)
 
         # Print the keys (parameter names) in the checkpoint
         print(checkpoint.keys())
@@ -346,6 +366,21 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(conv1_bias.shape, (6,))
         self.assertEqual(fc3_weight.shape, (10, 84))
         self.assertEqual(fc3_bias.shape, (10,))
+
+    def test_print_model_layer_shape(self):
+        net = nn.Sequential(
+            nn.LazyConv2d(out_channels=6, kernel_size=5, padding=2),
+            nn.Sigmoid(),
+            nn.AvgPool2d(kernel_size=2, stride=2)
+        )
+
+        print(net)
+
+        for layer in net:
+            x = torch.rand(size=(1, 1, 28, 28), dtype=torch.float32)
+            print(layer.__class__.__name__, 'output shape: \t', layer(x).shape)
+
+        self.assertTrue(True)
 
 
 if __name__ == '__main__':
