@@ -83,6 +83,82 @@ class GoogLeNet(nn.Module):
         return self.net(x)
 
 
+class InceptionBlockBN(nn.Module):
+    def __init__(self, c1, c2, c3, c4, **kwargs):
+        super(InceptionBlockBN, self).__init__()
+
+        # Path 1: Single 1x1 convolution layer
+        self.p1 = nn.Sequential(nn.LazyConv2d(c1, kernel_size=1),
+                                nn.BatchNorm2d(c1),
+                                nn.ReLU())
+
+        # Path 2: 1x1 convolution layer and 3x3 convolution layer
+        self.p2 = nn.Sequential(nn.LazyConv2d(c2[0], kernel_size=1),
+                                nn.LazyConv2d(c2[1], kernel_size=3, padding=1),
+                                nn.BatchNorm2d(c2[1]),
+                                nn.ReLU())
+
+        # Path 3: 1x1 convolution layer and 5x5 convolution layer
+        self.p3 = nn.Sequential(nn.LazyConv2d(c3[0], kernel_size=1),
+                                nn.LazyConv2d(c3[1], kernel_size=5, padding=2),
+                                nn.BatchNorm2d(c3[1]),
+                                nn.ReLU())
+
+        # Path 4: The 3x3 MaxPooling layer and 1x1 convolution layer
+        self.p4 = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+                                nn.LazyConv2d(c4, kernel_size=1),
+                                nn.BatchNorm2d(c4),
+                                nn.ReLU())
+
+    def forward(self, x):
+        p1 = self.p1(x)
+        p2 = self.p2(x)
+        p3 = self.p3(x)
+        p4 = self.p4(x)
+
+        # Concat four parallel layers on the channel dimension
+        return torch.cat([p1, p2, p3, p4], dim=1)
+
+
+class GoogLeNetBN(nn.Module):
+    def __init__(self):
+        super(GoogLeNetBN, self).__init__()
+
+        self.net = nn.Sequential(
+            # Module 1: 64 channels & 7x7 kernel size convolution layer
+            nn.LazyConv2d(64, kernel_size=7, stride=2, padding=3), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Module 2:
+            nn.LazyConv2d(64, kernel_size=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.LazyConv2d(192, kernel_size=3, padding=1), nn.BatchNorm2d(192), nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Module 3: Two Inception layers
+            InceptionBlockBN(64, (96, 128), (16, 32), 32),
+            InceptionBlockBN(128, (128, 192), (32, 96), 64),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Module 4: Five Inception layers
+            InceptionBlockBN(192, (96, 208), (16, 48), 64),
+            InceptionBlockBN(160, (112, 224), (24, 64), 64),
+            InceptionBlockBN(128, (128, 256), (24, 64), 64),
+            InceptionBlockBN(112, (144, 288), (32, 64), 64),
+            InceptionBlockBN(256, (160, 320), (32, 128), 128),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+
+            # Module 5: Two Inception layers
+            InceptionBlockBN(256, (160, 320), (32, 128), 128),
+            InceptionBlockBN(384, (192, 384), (48, 128), 128),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.LazyLinear(10)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 def load_data_fashion_mnist(batch_size, resize=None):
     trans = [transforms.ToTensor()]
 
@@ -265,6 +341,26 @@ Estimated Total Size (MB): 28.69
         _ = model(torch.randn((1, 1, 96, 96)).to(device))
 
         # Apply initialization method to the model
+        model.apply(init_model)
+
+        train(model, data_iter, test_iter, num_epochs, learning_rate, device)
+
+        self.assertTrue(True)
+
+    def test_googlenet_with_batch_normalization(self):
+        # hyperparameters
+        batch_size = 128
+        learning_rate = 0.5
+        num_epochs = 10
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        data_iter, test_iter = load_data_fashion_mnist(batch_size, resize=96)
+
+        model = GoogLeNetBN()
+        model.to(device=device)
+
+        # Dummy initialization method to the model
         model.apply(init_model)
 
         train(model, data_iter, test_iter, num_epochs, learning_rate, device)
