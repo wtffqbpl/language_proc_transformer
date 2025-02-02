@@ -13,6 +13,32 @@ import torchinfo
 from utils.accumulator import Accumulator
 
 
+# in PyTorch's torch.nn.BatchNorm2d, the momentum parameter is used to control the update
+# speed of the moving averages (running mean/variance). Its core purpose is to balance
+# the relationship between the statistics of the current batch (mean and variance) and the
+# historical moving averages, thereby gradually accumulating global statistics during
+# training for normalization during the inference phase.
+# Definition of momentum parameter
+#  * Function: During training, BatchNorm calculates the moving_mean and moving_var of
+#  the current batch and integrates these statistics  into the global moving averages
+# (moving_mean and moving_var) using the momentum parameter.
+#  * Formula:
+#    moving_mean = (1 - momentum) * moving_mean + momentum * batch_mean
+#    moving_var = (1 - momentum) * moving_var + momentum * batch_var
+#  Notes: The batch_mean is the alias of the mean, which is the mean of the last step
+#         updated in the backward computation.
+#
+# Impact of momentum
+#  * Larger value: The statistics of the current batch contribute more to the moving
+#    averages, resulting in faster updates and more focus on recent data.
+#    * Suitable for scenarios where data distribution changes rapidly (but may lead to
+#      instability)
+#  * Smaller value: The moving averages update more slowly, relying more on historical
+#    statistics and being less sensitive to changes in the current batch.
+#     * Suitable for scenarios with stable data distributions (smoother global statistics).
+#  * Default value: The default value of momentum in PyTorch is 0.1
+
+
 def batch_norm(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, moving_mean: torch.Tensor,
                moving_var: torch.Tensor, eps: float, momentum: float):
     # Deciding whether the current batch normalization is training mode or inference mode with
@@ -85,9 +111,9 @@ class Reshape(nn.Module):
         return x.view(-1, 1, 28, 28)
 
 
-class LeNetBN(nn.Module):
+class LeNetBNSimple(nn.Module):
     def __init__(self):
-        super(LeNetBN, self).__init__()
+        super(LeNetBNSimple, self).__init__()
 
         self.net = nn.Sequential(
             Reshape(),
@@ -97,6 +123,24 @@ class LeNetBN(nn.Module):
             nn.AvgPool2d(kernel_size=2, stride=2), nn.Flatten(),
             nn.LazyLinear(120), BatchNorm(120, num_dims=2), nn.Sigmoid(),
             nn.LazyLinear(84), BatchNorm(num_features=84, num_dims=2), nn.Sigmoid(),
+            nn.LazyLinear(10))
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class LeNetBN(nn.Module):
+    def __init__(self):
+        super(LeNetBN, self).__init__()
+
+        self.net = nn.Sequential(
+            Reshape(),
+            nn.LazyConv2d(6, kernel_size=5), nn.BatchNorm2d(6), nn.Sigmoid(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.LazyConv2d(16, kernel_size=5), nn.BatchNorm2d(16), nn.Sigmoid(),
+            nn.AvgPool2d(kernel_size=2, stride=2), nn.Flatten(),
+            nn.LazyLinear(120), nn.BatchNorm1d(120), nn.Sigmoid(),
+            nn.LazyLinear(84), nn.BatchNorm1d(84), nn.Sigmoid(),
             nn.LazyLinear(10))
 
     def forward(self, x):
@@ -184,7 +228,7 @@ def train(model: nn.Module,
 class IntegrationTest(unittest.TestCase):
 
     def test_lenet_shape(self):
-        model = LeNetBN()
+        model = LeNetBNSimple()
 
         act_output = None
         with patch('sys.stdout', new_callable=StringIO) as log:
@@ -197,7 +241,7 @@ class IntegrationTest(unittest.TestCase):
 ==========================================================================================
 Layer (type:depth-idx)                   Output Shape              Param #
 ==========================================================================================
-LeNetBN                                  [1, 16, 8, 10]            --
+LeNetBNSimple                            [1, 16, 8, 10]            --
 ├─Sequential: 1-1                        [1, 16, 8, 10]            --
 │    └─Reshape: 2-1                      [1, 1, 28, 28]            --
 │    └─Conv2d: 2-2                       [1, 6, 24, 24]            156
@@ -228,7 +272,7 @@ Estimated Total Size (MB): 0.56
         """
         self.assertEqual(expected_output.strip(), act_output)
 
-    def test_lenetbn(self):
+    def test_lenetbn_simple(self):
         # hyperparameters
         batch_size = 128
         learning_rate = 1.0
@@ -238,7 +282,7 @@ Estimated Total Size (MB): 0.56
 
         data_iter, test_iter = load_data_fashion_mnist(batch_size)
 
-        model = LeNetBN()
+        model = LeNetBNSimple()
         model.to(device=device)
 
         # Dummy initialization for LazyConv2d and LazyLinear
@@ -250,6 +294,50 @@ Estimated Total Size (MB): 0.56
         train(model, data_iter, test_iter, num_epochs, learning_rate, device)
 
         self.assertTrue(True)
+
+    def test_lenetbn(self):
+        # hyperparameters
+        batch_size = 128
+        learning_rate = 0.8
+        num_epochs = 10
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        data_iter, test_iter = load_data_fashion_mnist(batch_size)
+
+        model = LeNetBN()
+        model.to(device=device)
+
+        # Dummy initialization for LazyConv2d and LazyLinear
+        # _ = torch.randn(size=(1, 1, 28, 28)).to(device)
+        # reshape = Reshape()
+        # _ = model(_)
+        _ = model(torch.randn(size=(1, 2, 28, 28)).to(device=device))
+
+        # Apply initialization method to the model
+        model.apply(init_model)
+
+        train(model, data_iter, test_iter, num_epochs, learning_rate, device)
+
+        self.assertTrue(True)
+
+    def test_momentum(self):
+        # Define BatchNorm2d with momentum=0.1 (default value)
+        bn = torch.nn.BatchNorm2d(num_features=3, momentum=0.1)
+
+        # Forward pass (training mode)
+        channels = 3
+        x = torch.rand(2, channels, 4, 4)  # (N, C, H, W)
+        y = bn(x)
+
+        # Checking updated moving averages
+        print("running_mean: ", bn.running_mean)
+        print("running_var: ", bn.running_var)
+
+        self.assertEqual(1, bn.running_mean.ndim)
+        self.assertEqual(1, bn.running_var.ndim)
+        self.assertEqual(channels, bn.running_mean.numel())
+        self.assertEqual(channels, bn.running_var.numel())
 
 
 if __name__ == '__main__':
