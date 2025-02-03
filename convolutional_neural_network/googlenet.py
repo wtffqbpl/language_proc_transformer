@@ -226,12 +226,13 @@ def train(model: nn.Module,
 
             if i % 100 == 0:
                 print(f"Epoch: [{epoch+1}/{num_epochs}], ",
-                      f"Step: [{i+1}/{len(data_iter)}], ",
-                      f"Loss: {loss.item()}")
+                      f"step: [{i+1}/{len(data_iter)}], ",
+                      f"loss: {loss.item():.4f}")
 
         print(f"Epoch: [{epoch+1}/{num_epochs}], ",
-              f"Loss: {loss.item()}, ",
-              f"Accuracy: {evaluate(model, test_iter)}")
+              f"loss: {loss.item():.4f}, ",
+              f"training acc: {evaluate(model, data_iter):.4f}",
+              f"test acc: {evaluate(model, test_iter):.4f}")
 
 
 class IntegrationTest(unittest.TestCase):
