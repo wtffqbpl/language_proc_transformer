@@ -2,6 +2,7 @@
 
 
 import unittest
+import pytest
 import torch
 import torch.utils.data as data
 import torch.nn as nn
@@ -384,5 +385,5 @@ class IntegrationTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=True)
+    pytest.main(['-v', '-s'])
     pass

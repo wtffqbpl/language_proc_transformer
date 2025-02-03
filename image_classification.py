@@ -1,9 +1,10 @@
 #! coding: utf-8
 
+import os
 import torch
 import torch.nn as nn
 import torch.functional as F
-import torch.optim as optim
+from torch.utils import data
 import torchvision
 from torchvision import transforms
 from PIL import Image
@@ -27,7 +28,7 @@ test_data = torchvision.datasets.ImageFolder(root=test_data_path,
                                              transform=transforms)
 
 batch_size = 64
-train_data_loader = data.DataLoader(train_data, batch_size=batch_size)
+train_data_loader = data.DataLoader(val_data, batch_size=batch_size)
 val_data_loader = data.DataLoader(val_data, batch_size=batch_size)
 test_data_loader = data.DataLoader(test_data, batch_size=batch_size)
 
@@ -134,7 +135,7 @@ optimizer = torch.optim.Adam(simplenet.parameters(), lr=0.001)
 
 
 def train(model, optimizer, loss_fn, train_loader, val_loader, epochs=20, device='cuda'):
-    for epoch in range(1, epoch+1):
+    for epoch in range(1, epochs+1):
         training_loss, valid_loss = 0.0, 0.0
         model.train()
 
@@ -145,7 +146,7 @@ def train(model, optimizer, loss_fn, train_loader, val_loader, epochs=20, device
             targets = targets.to(device)
             output = model(inputs)
             loss = loss_fn(output, targets)
-            loss.backward9
+            loss.backward()
             optimizer.step()
             training_loss += loss.data.item() * inputs.size(0)
         training_loss /= len(train_loader.datasets)
@@ -159,8 +160,7 @@ def train(model, optimizer, loss_fn, train_loader, val_loader, epochs=20, device
             targets = targets.to(device)
             loss = loss_fn(output, targets)
             valid_loss += loss.data.item() * inputs.size(0)
-            correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1],
-                               targets).view(-1)
+            correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets).view(-1)
             num_correct += torch.sum(correct).item()
             num_examples += correct.shape[0]
         valid_loss /= len(val_loader.datasets)
@@ -185,6 +185,7 @@ train(simplenet,
 # Once you have trained your model, you can use it to make predictions on new data.
 labels = ['cat', 'fish']
 
+FILENAME = os.path.join(os.path.dirname(__file__), labels[0], 'train')
 img = Image.open(FILENAME)
 img = transforms(img)
 img = img.unsqueeze(0)
