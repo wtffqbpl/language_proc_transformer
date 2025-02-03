@@ -1,6 +1,5 @@
 #! coding: utf-8
-
-
+import os.path
 import unittest
 from unittest.mock import patch
 from io import StringIO
@@ -10,6 +9,8 @@ import torch.utils.data as data
 import torchvision
 import torchvision.transforms as transforms
 import torchinfo
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.accumulator import Accumulator
 
 
@@ -188,7 +189,7 @@ def evaluate(model, data_iter, device=torch.device('cpu')):
 
 def init_model(model: torch.nn.Module):
     if isinstance(model, torch.nn.LazyConv2d) or isinstance(model, torch.nn.Conv2d) or \
-        isinstance(model, torch.nn.LazyLinear) or isinstance(model, torch.nn.Linear):
+            isinstance(model, torch.nn.LazyLinear) or isinstance(model, torch.nn.Linear):
         torch.nn.init.xavier_uniform_(model.weight)
 
     if hasattr(model, 'bias') and model.bias is not None:
@@ -198,7 +199,7 @@ def init_model(model: torch.nn.Module):
 def train(model: nn.Module,
           data_iter: data.DataLoader, test_iter: data.DataLoader,
           num_epochs: int, lr: float,
-          device: torch.device=torch.device('cpu')):
+          device: torch.device = torch.device('cpu')):
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -215,14 +216,13 @@ def train(model: nn.Module,
             optimizer.step()
 
             if i % 100 == 0:
-                print(f'Epoch: [{epoch+1}/{num_epochs}], ',
-                      f'Step: [{i+1}/{len(data_iter)}], ',
+                print(f'Epoch: [{epoch + 1}/{num_epochs}], ',
+                      f'Step: [{i + 1}/{len(data_iter)}], ',
                       f'Loss: {loss.item():.4f}')
-        print(f'Epoch: [{epoch+1}/{num_epochs}], ',
+        print(f'Epoch: [{epoch + 1}/{num_epochs}], ',
               f'Loss: {loss.item():.4f}',
-              f'Training Accuracy: {evaluate(model, data_iter):.4f}',
-              f'Test Accuracy: {evaluate(model, test_iter):.4f}')
-    pass
+              f'Training Accuracy: {evaluate(model, data_iter, device):.4f}',
+              f'Test Accuracy: {evaluate(model, test_iter, device):.4f}')
 
 
 class IntegrationTest(unittest.TestCase):
