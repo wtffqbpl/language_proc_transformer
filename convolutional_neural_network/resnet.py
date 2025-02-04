@@ -68,6 +68,102 @@ class ResNet(nn.Module):
         return blk
 
 
+# one of the challenges one encounters in the design of ResNet is the trade-off
+# between nonlinear and dimensionality within a given block. That is, we could
+# add more non-linearity by increasing the number of layers, or by increasing
+# the width of the convolutions. An alternative strategy is to increase the
+# number of channels that can carry information between blocks. Unfortunately,
+# the latter comes with a quadratic penalty since the computational cost of
+# ingesting c_i channels and emitting c_o channels is O(c_i * c_o).
+# We can take some inspiration from the Inception block which has information
+# flowing through the block in separate groups. Applying the idea of multiple
+# independent groups to the Resnet block led to the design of ResNeXt.
+# Different from the smorgasbord of the transformations in Inception, ResNeXt
+# adopts the same transformation in all branches, thus minizing the need for
+# manual tuning of each branch.
+# The only challenge in this design is that no information is exchanged between
+# the g groups. The ResNeXt block amends this in two ways:
+#  1. The grouped convolution with a 3x3 kernel is sandwiched in between two
+#     1x1 convolutions.
+#  2. The second one serves double duty in changing the number of channels back.
+
+
+class ResNeXtBlock(nn.Module):
+    expansion = 4
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 stride=1,
+                 cardinality=32,
+                 base_width=4) -> None:
+        super(ResNeXtBlock, self).__init__()
+
+        self.cardinality = cardinality
+        width = int(out_channels * (base_width / 64.)) * cardinality
+
+        self.conv1 = nn.LazyConv2d(width, kernel_size=1, stride=1)
+        self.bn1 = nn.BatchNorm2d(width)
+        self.conv2 = nn.LazyConv2d(width, kernel_size=3, stride=stride, padding=1, groups=cardinality)
+        self.bn2 = nn.BatchNorm2d(width)
+        self.conv3 = nn.LazyConv2d(out_channels * self.expansion, kernel_size=1, stride=1)
+        self.bn3= nn.BatchNorm2d(out_channels * self.expansion)
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels * self.expansion:
+            self.shortcut = nn.Sequential(
+                nn.LazyConv2d(out_channels * self.expansion, kernel_size=1, stride=stride),
+                nn.LazyBatchNorm2d())
+
+    def forward(self, x):
+        y = self.relu(self.bn1(self.conv1(x)))
+        y = self.relu(self.bn2(self.conv2(y)))
+        y = self.bn3(self.conv3(y))
+        y = y + self.shortcut(x)
+        return self.relu(y)
+
+
+class ResNeXt(nn.Module):
+    def __init__(self, block, layers, num_classes=1000, cardinality=32, base_width=4) -> None:
+        super(ResNeXt, self).__init__()
+        self.cardinality = cardinality
+        self.base_width = base_width
+        self.in_channels = 64
+
+        layer0 = nn.Sequential(
+            nn.LazyConv2d(self.in_channels, kernel_size=7, stride=2, padding=3),
+            nn.LazyBatchNorm2d(), nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+        layer1 = self.resnext_block(block, 64, layers[0])
+        layer2 = self.resnext_block(block, 128, layers[1], stride=2)
+        layer3 = self.resnext_block(block, 256, layers[2], stride=2)
+        layer4 = self.resnext_block(block, 512, layers[3], stride=2)
+
+        self.net = nn.Sequential(
+            layer0, layer1, layer2, layer3, layer4,
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.LazyLinear(num_classes))
+
+    def forward(self, x):
+        return self.net(x)
+
+    def resnext_block(self, block, out_channels, num_residuals, stride=1):
+        layers = [
+            block(self.in_channels, out_channels, stride, self.cardinality, self.base_width)
+        ]
+
+        self.in_channels = out_channels * block.expansion
+        for _ in range(1, num_residuals):
+            layers.append(
+                block(self.in_channels, out_channels, 1, self.cardinality, self.base_width)
+            )
+
+        return nn.Sequential(*layers)
+
+
 def accuracy(y_hat: torch.Tensor, y: torch.Tensor) -> float:
     if y_hat.ndim > 1 and y_hat.shape[1] > 1:
         y_hat = y_hat.argmax(dim=1)
@@ -122,7 +218,7 @@ def train(model: nn.Module,
           data_iter: data.DataLoader, test_iter: data.DataLoader,
           lr: float, num_epochs: int,
           device: torch.device = torch.device('cpu')) -> None:
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
 
     for epoch in range(num_epochs):
@@ -220,14 +316,32 @@ Estimated Total Size (MB): 200.49
 
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        model = ResNet().to(device)
+        resnet18 = ResNet().to(device)
 
         # Dummy initialization for LazyConv2d and LazyLinear
-        _ = model(torch.randn(size=(1, 1, 96, 96)).to(device))
+        _ = resnet18(torch.randn(size=(1, 1, 96, 96)).to(device))
 
         data_iter, test_iter = load_fashion_mnist(batch_size, resize=96)
 
-        train(model, data_iter, test_iter, learning_rate, num_epochs, device)
+        train(resnet18, data_iter, test_iter, learning_rate, num_epochs, device)
+
+        self.assertTrue(True)
+
+    def test_resnext18(self):
+        # hyperparameters
+        batch_size, learning_rate, num_epochs = 128, 0.01, 10
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        num_classes = 10
+        # resnext50 = ResNeXt(ResNeXtBlock, [3, 4, 6, 3], num_classes=num_classes).to(device)
+        resnext18 = ResNeXt(ResNeXtBlock, [2, 2, 2, 2], num_classes=num_classes).to(device)
+
+        print(resnext18)
+
+        data_iter, test_iter = load_fashion_mnist(batch_size, resize=96)
+
+        train(resnext18, data_iter, test_iter, learning_rate, num_epochs, device)
 
         self.assertTrue(True)
 
