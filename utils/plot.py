@@ -2,9 +2,11 @@
 
 import numpy as np
 import matplotlib
-matplotlib.get_backend()
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from PIL import Image
 from matplotlib_inline import backend_inline
+matplotlib.get_backend()
 
 
 def use_svg_display():
@@ -61,4 +63,45 @@ def plot(x, y=None, xlabel=None, ylabel=None, legend=None, xlim=None, ylim=None,
 
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
     plt.show()
+
+
+class ImageUtils:
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def open(path=None):
+        assert path is not None, "image path should not be none"
+        try:
+            img = Image.open(path)
+        except Exception as e:
+            raise RuntimeError("Could not open image")
+
+        return img
+    
+    @staticmethod
+    def imshow(img: Image):
+        image_array = np.array(img)
+        plt.imshow(image_array)
+        plt.axis('off')
+        plt.show()
+
+    @staticmethod
+    def show_images(imgs, num_rows: int = 2, num_cols: int = 4, scale: float = 1.5):
+        fig, axes = plt.subplots(num_rows, num_cols)
+
+        for row in range(num_rows):
+            for col in range(num_cols):
+                linear_idx = col + row * num_cols
+                new_size = (int(imgs[linear_idx].width * scale), int(imgs[linear_idx].height * scale))
+
+                axes[row, col].imshow(imgs[linear_idx].resize(new_size))
+                axes[row, col].axis('off')
+
+        fig.show()
+
+    @staticmethod
+    def apply(img, aug, num_rows: int = 2, num_cols: int = 4, scale: float = 1.5):
+        y = [aug(img) for _ in range(num_rows * num_cols)]
+        ImageUtils.show_images(y, num_rows, num_cols, scale)
 
