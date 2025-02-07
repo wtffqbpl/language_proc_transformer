@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import torch
 import tarfile
 import zipfile
 import requests
@@ -50,3 +51,51 @@ def download_extract(name, folder=None):
 def download_all():
     for name in DATA_HUB:
         download(name)
+
+
+def all_cpu_devices() -> list[torch.device]:
+    return [torch.device('cpu')]
+
+
+def all_gpu_devices() -> list[torch.device]:
+    devices = []
+
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            devices.append(torch.device(f'cuda:{i}'))
+    return devices
+
+
+def all_mps_devices() -> list[torch.device]:
+    devices = []
+    # As of now, the MPS backend supports only a single device. Therefore, there
+    # should be only one MPS device.
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        devices.append(torch.device('mps'))
+
+    return devices
+
+
+def devices(device_name: str = None) -> list[torch.device]:
+    # First priority, we should find all cuda devices,
+    # Second priority, we should find all mps devices,
+    # Finally, we fall back to cpu.
+
+    device_func_map = {'cpu': all_cpu_devices, 'cuda': all_gpu_devices, 'mps': all_mps_devices}
+
+    if device_name:
+        # "device name must be in ['cpu', 'cuda', 'mps']."
+        assert device_name in device_func_map.keys()
+        return device_func_map[device_name]()
+
+    # Find all cuda devices
+    cuda_devices = all_gpu_devices()
+    if cuda_devices:
+        return cuda_devices
+
+    # Find all mps devices
+    mps_devices = all_mps_devices()
+    if mps_devices:
+        return mps_devices
+
+    return [torch.device('cpu')]
