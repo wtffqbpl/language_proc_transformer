@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.utils.data as data
 import torchvision
+import torchvision.models as models
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -68,6 +69,16 @@ class ResNet(nn.Module):
                 blk.append(Residual(num_channels, num_channels))
 
         return blk
+
+
+class ResNet18(nn.Module):
+    def __init__(self, num_classes=10):
+        super(ResNet18, self).__init__()
+        self.net = models.resnet18(pretrained=True)
+        self.net.fc = nn.Linear(self.net.fc.in_features, num_classes)
+
+    def forward(self, x):
+        return self.net(x)
 
 
 def load_cifar10_data(batch_size, train_augs, test_augs) -> tuple[data.DataLoader, data.DataLoader]:
@@ -270,6 +281,29 @@ class IntegrationTest(unittest.TestCase):
         train(model, train_iter, test_iter, loss_fn, optimizer, num_epochs, devices)
 
         self.assertTrue(True)
+
+    def test_cifar10_with_resnet18(self):
+        # hyperparameters
+        batch_size, learning_rate, num_epochs, num_classes = 128, 0.001, 10, 10
+
+        devices = dlf.devices()
+        model = ResNet18(num_classes=num_classes)
+        model.to(device=devices[0])
+
+        train_augs = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(size=96),
+            torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.ToTensor()])
+        test_augs = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(size=96),
+            torchvision.transforms.ToTensor()])
+
+        train_iter, test_iter = load_cifar10_data(batch_size, train_augs, test_augs)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        loss_fn = nn.CrossEntropyLoss()
+
+        train(model, train_iter, test_iter, loss_fn, optimizer, num_epochs, devices)
 
 
 if __name__ == "__main__":

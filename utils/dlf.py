@@ -58,22 +58,22 @@ def all_cpu_devices() -> list[torch.device]:
 
 
 def all_gpu_devices() -> list[torch.device]:
-    devices = []
+    device_list = []
 
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
-            devices.append(torch.device(f'cuda:{i}'))
-    return devices
+            device_list.append(torch.device(f'cuda:{i}'))
+    return device_list
 
 
 def all_mps_devices() -> list[torch.device]:
-    devices = []
+    device_list = []
     # As of now, the MPS backend supports only a single device. Therefore, there
     # should be only one MPS device.
     if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        devices.append(torch.device('mps'))
+        device_list.append(torch.device('mps'))
 
-    return devices
+    return device_list
 
 
 def devices(device_name: str = None) -> list[torch.device]:
@@ -89,13 +89,13 @@ def devices(device_name: str = None) -> list[torch.device]:
         return device_func_map[device_name]()
 
     # Find all cuda devices
-    cuda_devices = all_gpu_devices()
+    cuda_devices = device_func_map['cuda']()
     if cuda_devices:
         return cuda_devices
 
     # Find all mps devices
-    mps_devices = all_mps_devices()
+    mps_devices = device_func_map['mps']()
     if mps_devices:
         return mps_devices
 
-    return [torch.device('cpu')]
+    return device_func_map['cpu']()
