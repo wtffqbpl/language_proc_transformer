@@ -82,9 +82,9 @@ class ImageUtils:
     @staticmethod
     def imshow(img: Image):
         image_array = np.array(img)
-        plt.imshow(image_array)
+        img = plt.imshow(image_array)
         plt.axis('off')
-        plt.show()
+        return img
 
     @staticmethod
     def show_images(imgs, num_rows: int = 2, num_cols: int = 4, scale: float = 1.5):
