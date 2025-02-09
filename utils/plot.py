@@ -9,6 +9,9 @@ from matplotlib_inline import backend_inline
 matplotlib.get_backend()
 
 
+to_numpy = lambda x, *args, **kwargs: x.detach().numpy(*args, **kwargs)
+
+
 def use_svg_display():
     backend_inline.set_matplotlib_formats('svg')
 
@@ -68,7 +71,7 @@ def plot(x, y=None, xlabel=None, ylabel=None, legend=None, xlim=None, ylim=None,
 class ImageUtils:
     def __init__(self):
         pass
-    
+
     @staticmethod
     def open(path=None):
         assert path is not None, "image path should not be none"
@@ -78,7 +81,7 @@ class ImageUtils:
             raise RuntimeError("Could not open image")
 
         return img
-    
+
     @staticmethod
     def imshow(img: Image):
         image_array = np.array(img)
@@ -88,17 +91,32 @@ class ImageUtils:
 
     @staticmethod
     def show_images(imgs, num_rows: int = 2, num_cols: int = 4, scale: float = 1.5):
-        fig, axes = plt.subplots(num_rows, num_cols)
+        figsize = (num_cols * scale, num_rows * scale)
 
-        for row in range(num_rows):
-            for col in range(num_cols):
-                linear_idx = col + row * num_cols
-                new_size = (int(imgs[linear_idx].width * scale), int(imgs[linear_idx].height * scale))
+        _, axes = plt.subplots(num_rows, num_cols, figsize=figsize)
+        axes = axes.flatten()
 
-                axes[row, col].imshow(imgs[linear_idx].resize(new_size))
-                axes[row, col].axis('off')
+        for i, (ax, img) in enumerate(zip(axes, imgs)):
+            try:
+                img = to_numpy(img)
+            except Exception as _:
+                pass
+            ax.imshow(img)
+            ax.axes.get_xaxis().set_visible(False)
+            ax.axes.get_yaxis().set_visible(False)
+        return axes
 
-        fig.show()
+    @staticmethod
+    def bbox_to_rect(bbox, color):
+        # bbox: The abbreviation for bounding box
+        return plt.Rectangle(
+            xy=(bbox[0], bbox[1]), width=bbox[2]-bbox[0], height=bbox[3]-bbox[1],
+            fill=False, edgecolor=color, linewidth=2)
+
+    @staticmethod
+    def show_boxes(axis, bbox: list, colors: list[str]):
+        for box in bbox:
+            axis.add_patch(ImageUtils.bbox_to_rect(box, colors[0]))
 
     @staticmethod
     def apply(img, aug, num_rows: int = 2, num_cols: int = 4, scale: float = 1.5):

@@ -3,6 +3,7 @@
 
 import unittest
 import os
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.utils.data as data
@@ -319,6 +320,8 @@ class IntegrationTest(unittest.TestCase):
 
         # Show images
         Image.show_images(hotdogs + not_hotdogs, 2, 8, scale=1.4)
+
+        plt.show()
 
         # Using mean and variance of the RGB channels for each channel normalization.
         normalize = torchvision.transforms.Normalize(
