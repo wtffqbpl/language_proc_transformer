@@ -103,6 +103,39 @@ def load_data_bananas(batch_size):
     return train_iter, val_iter
 
 
+def multibox_prior(data: torch.Tensor, sizes: list[float], ratios: list[float]):
+    # Generate a list of anchor boxes for each pixel.
+    in_height, in_width = data.shape[-2:]
+    device, num_sizes, num_ratios = data.device, len(sizes), len(ratios)
+    boxes_per_pixel = (num_sizes + num_ratios - 1)
+    size_tensor = torch.tensor(sizes, device=device)
+    ratio_tensor = torch.tensor(ratios, device=device)
+
+    offset_h, offset_w = 0.5, 0.5
+    steps_h = 1.0 / in_height
+    steps_w = 1.0 / in_width
+
+    # Generate all center pts
+    center_h = (torch.arange(in_height, device=device) + offset_h) * steps_h
+    center_w = (torch.arange(in_width, device=device) + offset_w) * steps_w
+    shift_y, shift_x = torch.meshgrid(center_h, center_w, indexing='ij')
+    shift_y, shift_x = shift_y.reshape(-1), shift_x.reshape(-1)
+
+    w = torch.cat((size_tensor * torch.sqrt(ratio_tensor[0]),
+                   sizes[0] * torch.sqrt(ratio_tensor[1:]))) \
+        * in_height / in_width
+    h = torch.cat((size_tensor / torch.sqrt(ratio_tensor[0]),
+                   sizes[0] / torch.sqrt(ratio_tensor[1:])))
+
+    anchor_manipulations = torch.stack((-w, -h, w, h)).T.repeat(
+        in_height * in_width, 1) / 2
+
+    out_grid = torch.stack([shift_x, shift_y, shift_x, shift_y],
+                           dim=1).repeat_interleave(boxes_per_pixel, dim=0)
+    output = out_grid + anchor_manipulations
+    return output.unsqueeze(0)
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.img_path = os.path.join(str(Path(__file__).resolve().parent), 'catdog.png')
@@ -137,7 +170,21 @@ class IntegrationTest(unittest.TestCase):
         axes = ImageUtils.show_images(imgs, 2, 5, scale=2)
         for ax, label in zip(axes, batch[1][0:10]):
             ImageUtils.show_boxes(ax, [label[0][1:5] * edge_size], colors=['w'])
+
+        # Add plt.show() at the end of the function, because I don't know how
+        # to execute plt.show() before this function exiting automatically.
         plt.show()
+
+    def test_anchor_boxes(self):
+        img = ImageUtils.imread(self.img_path)
+        h, w = img.shape[:2]
+        print(h, w)
+        self.assertEqual((728, 561), (w, h))
+
+        x = torch.rand(size=(1, 3, h, w))
+        y = multibox_prior(x, sizes=[0.75, 0.5, 0.25], ratios=[1, 2, 0.5])
+        print('y.shape: ', y.shape)
+        self.assertEqual(y.shape, torch.Size([1, 2042040, 4]))
 
 
 if __name__ == "__main__":

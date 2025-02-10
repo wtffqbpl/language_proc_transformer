@@ -83,6 +83,15 @@ class ImageUtils:
         return img
 
     @staticmethod
+    def imread(path=None):
+        assert path is not None, "image path should not be none"
+        try:
+            img = plt.imread(path)
+        except Exception as e:
+            raise RuntimeError("Could not open image")
+        return img
+
+    @staticmethod
     def imshow(img: Image):
         image_array = np.array(img)
         img = plt.imshow(image_array)
