@@ -10,6 +10,8 @@ import pandas as pd
 import torchvision
 import sys
 from pathlib import Path
+from typing import Any
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.plot import ImageUtils
 import utils.dlf as dlf
@@ -40,7 +42,7 @@ def box_center_to_corner(boxes):
 def bbox_to_rect(bbox, color):
     # bbox: The abbreviation for bounding box
     return plt.Rectangle(
-        xy=(bbox[0], bbox[1]), width=bbox[2]-bbox[0], height=bbox[3]-bbox[1],
+        xy=(bbox[0], bbox[1]), width=bbox[2] - bbox[0], height=bbox[3] - bbox[1],
         fill=False, edgecolor=color, linewidth=2)
 
 
@@ -95,15 +97,29 @@ def load_data_bananas(batch_size):
     # Load banana dataset
     train_iter = torch.utils.data.DataLoader(
         BananasDataset(is_train=True),
-        batch_size=batch_size,shuffle=True, num_workers=4)
+        batch_size=batch_size, shuffle=True, num_workers=4)
     val_iter = torch.utils.data.DataLoader(
         BananasDataset(is_train=False),
-        batch_size=batch_size,shuffle=False, num_workers=4)
+        batch_size=batch_size, shuffle=False, num_workers=4)
 
     return train_iter, val_iter
 
 
 def multibox_prior(data: torch.Tensor, sizes: list[float], ratios: list[float]):
+    """
+    The multibox_prior function generates prior (anchor) boxes through the following steps:
+        1. Determine the normalized center coordinates for each pixel based on
+           the dimensions of the input feature map.
+        2. Compute the widths and heights of the prior boxes using the provided
+           scales and aspect ratios.
+        3. Construct the offsets for multiple prior boxes at each pixel and add
+           them to the pixel centers to obtain the complete prior box coordinates.
+        4. Finally, add a batch dimension before returning the result.
+    :param data: (batch_size, channels, width, height).
+    :param sizes: list of the scale (width / height).
+    :param ratios: list of the aspect ratio.
+    :return: anchor_boxes.shape = (batch_size, num_anchors, 4)
+    """
     # Generate a list of anchor boxes for each pixel.
     in_height, in_width = data.shape[-2:]
     device, num_sizes, num_ratios = data.device, len(sizes), len(ratios)
@@ -134,6 +150,57 @@ def multibox_prior(data: torch.Tensor, sizes: list[float], ratios: list[float]):
                            dim=1).repeat_interleave(boxes_per_pixel, dim=0)
     output = out_grid + anchor_manipulations
     return output.unsqueeze(0)
+
+
+def box_iou(boxes1, boxes2):
+    box_area = lambda boxes: ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]))
+    # The shapes of the boxes1, boxes2, areas1 and areas2.
+    # (the number of boxes1, 4)
+    # (the number of boxes2, 4)
+    # (the number of boxes1, )
+    # (the number of boxes2, )
+    areas1 = box_area(boxes1)
+    areas2 = box_area(boxes2)
+
+    # The shapes of the inter_upperlefts, inter_lowerrights, inters
+    # (the number of boxes1, the number of boxes2, 2)
+    inter_upperlefts = torch.max(boxes1[:, None, :2], boxes2[:, :2])
+    inter_lowerrights = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])
+    inters = (inter_lowerrights - inter_upperlefts).clamp(min=0)
+    # The shape of the inter_areasandunion_areas is (the number of boxes1, the number of boxes2)
+    inter_areas = inters[:, :, 0] * inters[:, :, 1]
+    union_areas = areas1[:, None] + areas2 - inter_areas
+    return inter_areas / union_areas
+
+
+def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
+    # Assign closest ground-truth bounding boxes to anchor boxes.
+    num_anchors, num_gt_boxes = anchors.shape[0], ground_truth.shape[0]
+    # Element x_ij in the i-th row and j-th column is the IoU of the anchor
+    # box i and the ground-truth bounding box j.
+    jaccard = box_iou(anchors, ground_truth)
+
+    # initialize the tensor to hold the assigned ground-truth bounding box for
+    # each anchor.
+    anchors_bbox_map = torch.full((num_anchors, ), -1, dtype=torch.long, device=device)
+
+    # Assign ground-truth bounding boxes according to the threshold.
+    max_ious, indices = torch.max(jaccard, dim=1)
+    anc_i = torch.nonzero(max_ious >= iou_threshold).reshape(-1)
+    box_j = indices[max_ious >= iou_threshold]
+    anchors_bbox_map[anc_i] = box_j
+    col_discard = torch.full((num_anchors, ), -1)
+    row_discard = torch.full((num_gt_boxes, ), -1)
+
+    for _ in range(num_gt_boxes):
+        max_idx = torch.argmax(jaccard)  # Find the largest IoU
+        box_idx = (max_idx % num_gt_boxes).long()
+        anc_idx = (max_idx / num_gt_boxes).long()
+        anchors_bbox_map[anc_idx] = box_idx
+        jaccard[:, box_idx] = col_discard
+        jaccard[anc_idx, :] = row_discard
+
+    return anchors_bbox_map
 
 
 class IntegrationTest(unittest.TestCase):
@@ -185,6 +252,18 @@ class IntegrationTest(unittest.TestCase):
         y = multibox_prior(x, sizes=[0.75, 0.5, 0.25], ratios=[1, 2, 0.5])
         print('y.shape: ', y.shape)
         self.assertEqual(y.shape, torch.Size([1, 2042040, 4]))
+
+        boxes = y.reshape(h, w, 5, 4)
+        print(boxes[250, 250, 0, :])
+
+        bbox_scale = torch.tensor((w, h, w, h))
+        fig = ImageUtils.imshow(img)
+        ImageUtils.show_boxes(fig.axes, boxes[250, 250, :, :] * bbox_scale,
+                              ['s=0.75, r=1', 's=0.5, r=1', 's=0.25, r=1',
+                               's=0.75, r=2', 's=0.75, r=0.5'])
+
+        # plt.show() manually
+        plt.show()
 
 
 if __name__ == "__main__":
