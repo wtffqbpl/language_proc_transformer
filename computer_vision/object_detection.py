@@ -182,15 +182,15 @@ def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
 
     # initialize the tensor to hold the assigned ground-truth bounding box for
     # each anchor.
-    anchors_bbox_map = torch.full((num_anchors, ), -1, dtype=torch.long, device=device)
+    anchors_bbox_map = torch.full((num_anchors,), -1, dtype=torch.long, device=device)
 
     # Assign ground-truth bounding boxes according to the threshold.
     max_ious, indices = torch.max(jaccard, dim=1)
     anc_i = torch.nonzero(max_ious >= iou_threshold).reshape(-1)
     box_j = indices[max_ious >= iou_threshold]
     anchors_bbox_map[anc_i] = box_j
-    col_discard = torch.full((num_anchors, ), -1)
-    row_discard = torch.full((num_gt_boxes, ), -1)
+    col_discard = torch.full((num_anchors,), -1)
+    row_discard = torch.full((num_gt_boxes,), -1)
 
     for _ in range(num_gt_boxes):
         max_idx = torch.argmax(jaccard)  # Find the largest IoU
@@ -201,6 +201,152 @@ def assign_anchor_to_bbox(ground_truth, anchors, device, iou_threshold=0.5):
         jaccard[anc_idx, :] = row_discard
 
     return anchors_bbox_map
+
+
+def offset_boxes(anchors, assigned_bb, eps=1e-6):
+    # Transform for anchor box offsets.
+    c_anc = box_corner_to_center(anchors)
+    c_assigned_bb = box_corner_to_center(assigned_bb)
+    offset_xy = 10 * (c_assigned_bb[:, :2] - c_anc[:, :2]) / c_anc[:, 2:]
+    offset_wh = 5 * torch.log(eps + c_assigned_bb[:, 2:] / c_anc[:, 2:])
+    offset = torch.cat([offset_xy, offset_wh], dim=1)
+    return offset
+
+
+# If an anchor box is not assigned a ground-truth bounding box, we just label the
+# class of the anchor box as "background". Anchor boxes whose classes are
+# background are often referred to as negative anchor boxes, and the rest are called
+# positive anchor boxes.
+# The multibox_target function to label classes and offsets for anchor boxes (the
+# anchors' argument) using ground-truth bounding boxes (the labels' argument). This
+# function sets the background class to zero and increments the integer index of
+# a new class by one.
+def multibox_target(anchors, labels):
+    # Label anchor boxes using ground-truth bounding boxes.
+    batch_size, anchors = labels.shape[0], anchors.squeeze(0)
+    batch_offset, batch_mask, batch_class_labels = [], [], []
+    device, num_anchors = anchors.device, anchors.shape[0]
+
+    for i in range(batch_size):
+        label = labels[i, :, :]
+        anchors_bbox_map = assign_anchor_to_bbox(label[:, 1:], anchors, device)
+        bbox_mask = ((anchors_bbox_map >= 0).float().unsqueeze(-1).repeat(1, 4))
+        # Initialize class labels and assigned bounding box coordinates with zeros
+        class_labels = torch.zeros(num_anchors, dtype=torch.long, device=device)
+        assigned_bb = torch.zeros((num_anchors, 4), dtype=torch.float32, device=device)
+
+        # Label classes of anchor boxes using their assigned ground-truth bounding boxes.
+        # If an anchor box is not assigned any, we label its class as background (the
+        # value remains zero)
+        indices_true = torch.nonzero(anchors_bbox_map >= 0)
+        bb_idx = anchors_bbox_map[indices_true]
+        class_labels[indices_true] = label[bb_idx, 0].long() + 1
+        assigned_bb[indices_true] = label[bb_idx, 1:]
+
+        # Offset transformation
+        offset = offset_boxes(anchors, assigned_bb) * bbox_mask
+        batch_offset.append(offset.reshape(-1))
+        batch_mask.append(bbox_mask.reshape(-1))
+        batch_class_labels.append(class_labels)
+
+    bbox_offset = torch.stack(batch_offset)
+    bbox_mask = torch.stack(batch_mask)
+    class_labels = torch.stack(batch_class_labels)
+    return bbox_offset, bbox_mask, class_labels
+
+
+# During prediction, we generate multiple anchor boxes for the image and predict classes
+# and offsets for each of them. A predicted bounding box is thus obtained according
+# to an anchor box with its predicted offset. Below we implement the offset_inverse
+# function that takes in anchors and offset predictions as inputs and applies inverse
+# offset transformations to return the predicted bounding box coordinates.
+def offset_inverse(anchors, offset_preds):
+    # Predict bounding boxes based on anchor boxes with predicted offsets.
+    anc = box_corner_to_center(anchors)
+    pred_bbox_xy = (offset_preds[:, :2] * anc[:, 2:] / 10) + anc[:, :2]
+    pred_bbox_wh = torch.exp(offset_preds[:, 2:] / 5) * anc[:, 2:]
+    pred_bbox = torch.cat((pred_bbox_xy, pred_bbox_wh), dim=1)
+    predicted_bbox = box_center_to_corner(pred_bbox)
+    return predicted_bbox
+
+
+# When there are many anchor boxes, many similar (with significant overlap) predicted
+# bounding boxes can be potentially output for surrounding the same object. To simplify
+# the output, we can merge similar predicted bounding boxes that belong to the same
+# by using non-maximum suppression (NMS).
+# Here is how non-maximum suppression works. For a predicted bounding box B, the
+# object detection model calculates the predicted likelihood for each class. Denoting
+# by p the largest predicted likelihood, the class corresponding to this probability
+# is the predicted class for B. Specifically, we refere to p as the confidence (score)
+# of the predicted bounding box B. On the same image, all the predicted non-background
+# bounding boxes are sorted by confidence in descending order to generate a list L.
+# Then we manipulate the sorted list L in the following steps:
+#  1. Select the predicted bounding box B1 with the highest confidence from L as a basis
+#     and remove all non-basis predicted bounding boxes whose IoU with B1 exceeds a
+#     predefined threshold e from L. At this point, L keeps the predicted bounding box
+#     with the highest confidence but drops others that are too similar to it. In a
+#     nutshell, those with non-maximum confidence scores aare suppressed.
+#  2. Select the predicted bounding box B2 with the second highest confidence from L
+#     as another basis and remove all non-basis predicted bounding boxes whose IoU with
+#     B2 exceeds e from L.
+#  3. Repeat the above proces until all the predicted bounding boxes in L have been used
+#     as a basis. At this time, the IoU of any pair of predicted bounding boxes in L is
+#     below the threshold e, thus no pair is too similar with each other.
+#  4. Output all the predicted bounding boxes in the list L.
+# The following nms function sorts confidence scores in descedning order and returns
+# their indices.
+def nms(boxes, scores, iou_threshold):
+    # Sort confidence scores of predicted bounding boxes.
+    b = torch.argsort(scores, dim=-1, descending=True)
+    keep = []  # Indices of predicted bounding boxes that will be kept.
+    while b.numel() > 0:
+        i = b[0]
+        keep.append(i)
+
+        if b.numel() == 1:
+            break
+
+        iou = box_iou(boxes[i, :].reshape(-1, 4),
+                      boxes[b[1:], :].reshape(-1, 4)).reshape(-1)
+        indices = torch.nonzero(iou <= iou_threshold).reshape(-1)
+        b = b[indices + 1]
+    return torch.tensor(keep, device=boxes.device)
+
+
+def multibox_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5,
+                       pos_threshold=0.009999999):
+    device, batch_size = cls_probs.device, cls_probs.shape[0]
+    anchors = anchors.squeeze(0)
+    num_classes, num_anchors = cls_probs.shape[1], cls_probs.shape[2]
+    out = []
+
+    for i in range(batch_size):
+        cls_prob, offset_pred = cls_probs[i], offset_preds[i].reshape(-1, 4)
+        conf, class_id = torch.max(cls_prob[1:], 0)
+        predicted_bb = offset_inverse(anchors, offset_pred)
+        keep = nms(predicted_bb, conf, nms_threshold)
+
+        # Find all non-keep indices, and set the class to background
+        all_idx = torch.arange(num_anchors, dtype=torch.long, device=device)
+        combined = torch.cat((keep, all_idx))
+        uniques, counts = combined.unique(return_counts=True)
+        non_keep = uniques[counts == 1]
+        all_id_sorted = torch.cat((keep, non_keep))
+        class_id[non_keep] = -1
+        class_id = class_id[all_id_sorted]
+        conf, predicted_bb = conf[all_id_sorted], predicted_bb[all_id_sorted]
+
+        # Here `pos_threshold` is a  threshold for positive (non-background)
+        # predictions.
+        below_min_idx = (conf < pos_threshold)
+        class_id[below_min_idx] = -1
+        conf[below_min_idx] = 1 - conf[below_min_idx]
+        pred_info = torch.cat((class_id.unsqueeze(1),
+                               conf.unsqueeze(1),
+                               predicted_bb), dim=1)
+        out.append(pred_info)
+
+    return torch.stack(out)
 
 
 class IntegrationTest(unittest.TestCase):
@@ -263,6 +409,85 @@ class IntegrationTest(unittest.TestCase):
                                's=0.75, r=2', 's=0.75, r=0.5'])
 
         # plt.show() manually
+        plt.show()
+
+    def test_annotate_classes_and_offsets(self):
+        ground_truth = torch.tensor([[0, 0.1, 0.08, 0.52, 0.92],
+                                     [1, 0.55, 0.2, 0.9, 0.88]])
+        anchors = torch.tensor([[0, 0.1, 0.2, 0.3], [0.15, 0.2, 0.4, 0.4],
+                                [0.63, 0.05, 0.88, 0.98], [0.66, 0.45, 0.8, 0.8],
+                                [0.57, 0.3, 0.92, 0.9]])
+        img = ImageUtils.imread(self.img_path)
+        h, w = img.shape[:2]
+        bbox_scale = torch.tensor((w, h, w, h))
+
+        fig = ImageUtils.imshow(img)
+        ImageUtils.show_boxes(fig.axes, ground_truth[:, 1:] * bbox_scale, ['dog', 'cat'], ['k'])
+        ImageUtils.show_boxes(fig.axes, anchors * bbox_scale, ['0', '1', '2', '3', '4'])
+
+        # plt.show() manually
+        plt.show()
+
+        labels = multibox_target(anchors.unsqueeze(dim=0), ground_truth.unsqueeze(dim=0))
+
+        print(labels[2])
+        self.assertTrue(torch.equal(torch.tensor([[0, 1, 2, 0, 2]]), labels[2]))
+
+    def test_predictions(self):
+        anchors = torch.tensor([[0.1, 0.08, 0.52, 0.92], [0.08, 0.2, 0.56, 0.95],
+                                [0.15, 0.3, 0.62, 0.91], [0.55, 0.2, 0.9, 0.88]])
+        offset_preds = torch.tensor([0] * anchors.numel())
+        cls_probs = torch.tensor([[0] * 4,  # Predicted background likelihood
+                                  [0.9, 0.8, 0.7, 0.1],  # Predicted dog likelihood
+                                  [0.1, 0.2, 0.3, 0.9]])  # Predicted cat likelihood
+
+        img = ImageUtils.imread(self.img_path)
+        fig = ImageUtils.imshow(img)
+
+        h, w = img.shape[:2]
+        bbox_scale = torch.tensor((w, h, w, h))
+        ImageUtils.show_boxes(fig.axes, anchors * bbox_scale,
+                              ['dog=0.9', 'dog=0.8', 'cat=0.7', 'cat=0.9'])
+
+        # plt.show() manually
+        plt.show()
+
+        output = multibox_detection(cls_probs.unsqueeze(dim=0),
+                                    offset_preds.unsqueeze(dim=0),
+                                    anchors.unsqueeze(dim=0),
+                                    nms_threshold=0.5)
+        print(output)
+
+        fig = ImageUtils.imshow(img)
+        for i in output[0].detach().numpy():
+            if i[0] == -1:
+                continue
+            label = ('dog=', 'cat=')[int(i[0])] + str(i[1])
+            ImageUtils.show_boxes(fig.axes, [torch.tensor(i[2:]) * bbox_scale], label)
+
+        # plt.show() manually
+        plt.show()
+
+    def test_display_anchors(self):
+        img = ImageUtils.imread(self.img_path)
+        h, w = img.shape[:2]
+        print(f'(H, W) = ({h}, {w})')
+        self.assertEqual(561, h)
+        self.assertEqual(728, w)
+
+        def display_anchors(fmap_w, fmap_h, s):
+            fmap = torch.zeros((1, 10, fmap_h, fmap_w))
+            anchors = multibox_prior(fmap, sizes=s, ratios=[1, 2, 0.5])
+            bbox_scale = torch.tensor((w, h, w, h))
+            ImageUtils.show_boxes(ImageUtils.imshow(img).axes, anchors[0] * bbox_scale)
+
+        display_anchors(fmap_w=4, fmap_h=4, s=[0.15])
+        plt.show()
+
+        display_anchors(fmap_w=2, fmap_h=2, s=[0.4])
+        plt.show()
+
+        display_anchors(fmap_w=1, fmap_h=1, s=[0.8])
         plt.show()
 
 
