@@ -10,6 +10,7 @@ import torchvision
 import torchvision.transforms as transforms
 import torchinfo
 from utils.accumulator import Accumulator
+import utils.dlf as dlf
 
 
 class InceptionBlock(nn.Module):
@@ -331,7 +332,7 @@ Estimated Total Size (MB): 28.69
         learning_rate = 0.01
         num_epochs = 10
 
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = dlf.devices()[0]
 
         data_iter, test_iter = load_data_fashion_mnist(batch_size, resize=96)
 

@@ -3,18 +3,22 @@
 
 import os
 import unittest
-
+from unittest.mock import patch
+from io import StringIO
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import pandas as pd
 import torchvision
+import torchinfo
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.plot import ImageUtils
+from utils.accumulator import Accumulator
+from utils.timer import Timer
 import utils.dlf as dlf
 
 
@@ -475,6 +479,63 @@ class TinySSD(nn.Module):
         return y, anchors, cls_preds, bbox_preds
 
 
+class ObjectDetectionLossCalc:
+    def __init__(self):
+        self.cls_loss = nn.CrossEntropyLoss(reduction='none')
+        self.bbox_loss = nn.L1Loss(reduction='none')
+
+    def __call__(self, cls_preds, cls_labels, bbox_preds, bbox_labels, bbox_masks):
+        batch_size, num_classes = cls_preds.shape[0], cls_preds.shape[2]
+        cls = self.cls_loss(cls_preds.reshape(-1, num_classes),
+                            cls_labels.reshape(-1)).reshape(batch_size, -1).mean(dim=1)
+        bbox = self.bbox_loss(bbox_preds * bbox_masks,
+                              bbox_labels * bbox_masks).mean(dim=1)
+        return cls + bbox
+
+
+def cls_eval(cls_preds, cls_labels):
+    return float((cls_preds.argmax(dim=-1).to(dtype=cls_labels.dtype) == cls_labels).sum())
+
+
+def bbox_eval(bbox_preds, bbox_labels, bbox_masks):
+    return float(torch.abs((bbox_labels - bbox_preds) * bbox_masks).sum())
+
+
+def train(net: nn.Module, train_iter, optimizer, calc_loss, num_epochs, device):
+
+    net = net.to(device=device)
+
+    timer = Timer()
+
+    for epoch in range(num_epochs):
+        # Sum of training accuracy, no. of examples in sum of training accuracy,
+        # Sum of absolute error, no. of examples in sum of absolute error
+        metric = Accumulator(4)
+        net.train()
+
+        for features, target in train_iter:
+            timer.start()
+            optimizer.zero_grad()
+            x, y = features.to(device), target.to(device)
+            # Generate multiscale anchor boxes and predict their classes and offsets
+            anchors, cls_preds, bbox_preds = net(x)
+            # Label the classes and offsets of these anchor boxes
+            bbox_labels, bbox_masks, cls_labels = multibox_target(anchors, y)
+            # Calculate the loss function using the predicted and labeled values
+            # of the classes and offsets
+            loss = calc_loss(cls_preds, cls_labels, bbox_preds, bbox_labels, bbox_masks)
+            loss.mean().backward()
+            optimizer.step()
+
+            metric.add(cls_eval(cls_preds, cls_labels), cls_labels.numel(),
+                       bbox_eval(bbox_preds, bbox_labels, bbox_masks), bbox_labels.numel())
+        cls_err, bbox_mae = 1 - metric[0] / metric[1], metric[2] / metric[3]
+        print(f'iter: {epoch+1}, ', f'class error: {cls_err:.2e}, ', f'bbox mae: {bbox_mae:.2e}')
+
+    print(f'{len(train_iter.dataset) / timer.stop():.1f} examples/sec on ',
+          f'{str(device)}')
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.img_path = os.path.join(str(Path(__file__).resolve().parent), 'catdog.png')
@@ -650,7 +711,7 @@ class IntegrationTest(unittest.TestCase):
         print(y.shape)
         self.assertEqual(torch.Size([2, 64, 32, 32]), y.shape)
 
-    def test_tinyssd(self):
+    def test_tinyssd_basics(self):
         sizes = [[0.2, 0.272], [0.37, 0.447], [0.54, 0.619], [0.71, 0.79], [0.88, 0.961]]
         ratios = [[1, 2, 0.5]] * 5
         num_anchors = len(sizes[0]) + len(ratios[0]) - 1
@@ -664,6 +725,110 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(torch.Size([1, 5444, 4]), anchors.shape)
         self.assertEqual(torch.Size([32, 5444, 2]), cls_preds.shape)
         self.assertEqual(torch.Size([32, 21776]), bbox_preds.shape)
+
+        with patch('sys.stdout', new_callable=StringIO) as log:
+            torchinfo.summary(model=net, input_size=(32, 3, 256, 256))
+            act_output = log.getvalue().strip()
+
+        expected_output = """
+===============================================================================================
+Layer (type:depth-idx)                        Output Shape              Param #
+===============================================================================================
+TinySSD                                       [1, 5444, 4]              --
+├─BaseNetworkBlock: 1-1                       [32, 64, 32, 32]          --
+│    └─Sequential: 2-1                        [32, 64, 32, 32]          --
+│    │    └─DownSamplingBlock: 3-1            [32, 16, 128, 128]        2,832
+│    │    └─DownSamplingBlock: 3-2            [32, 32, 64, 64]          14,016
+│    │    └─DownSamplingBlock: 3-3            [32, 64, 32, 32]          55,680
+├─ClassPredictor: 1-2                         [32, 8, 32, 32]           --
+│    └─Sequential: 2-2                        [32, 8, 32, 32]           --
+│    │    └─Conv2d: 3-4                       [32, 8, 32, 32]           4,616
+├─BBoxPredictor: 1-3                          [32, 16, 32, 32]          --
+│    └─Sequential: 2-3                        [32, 16, 32, 32]          --
+│    │    └─Conv2d: 3-5                       [32, 16, 32, 32]          9,232
+├─DownSamplingBlock: 1-4                      [32, 128, 16, 16]         --
+│    └─Sequential: 2-4                        [32, 128, 16, 16]         --
+│    │    └─Conv2d: 3-6                       [32, 128, 32, 32]         73,856
+│    │    └─BatchNorm2d: 3-7                  [32, 128, 32, 32]         256
+│    │    └─ReLU: 3-8                         [32, 128, 32, 32]         --
+│    │    └─Conv2d: 3-9                       [32, 128, 32, 32]         147,584
+│    │    └─BatchNorm2d: 3-10                 [32, 128, 32, 32]         256
+│    │    └─ReLU: 3-11                        [32, 128, 32, 32]         --
+│    │    └─MaxPool2d: 3-12                   [32, 128, 16, 16]         --
+├─ClassPredictor: 1-5                         [32, 8, 16, 16]           --
+│    └─Sequential: 2-5                        [32, 8, 16, 16]           --
+│    │    └─Conv2d: 3-13                      [32, 8, 16, 16]           9,224
+├─BBoxPredictor: 1-6                          [32, 16, 16, 16]          --
+│    └─Sequential: 2-6                        [32, 16, 16, 16]          --
+│    │    └─Conv2d: 3-14                      [32, 16, 16, 16]          18,448
+├─DownSamplingBlock: 1-7                      [32, 128, 8, 8]           --
+│    └─Sequential: 2-7                        [32, 128, 8, 8]           --
+│    │    └─Conv2d: 3-15                      [32, 128, 16, 16]         147,584
+│    │    └─BatchNorm2d: 3-16                 [32, 128, 16, 16]         256
+│    │    └─ReLU: 3-17                        [32, 128, 16, 16]         --
+│    │    └─Conv2d: 3-18                      [32, 128, 16, 16]         147,584
+│    │    └─BatchNorm2d: 3-19                 [32, 128, 16, 16]         256
+│    │    └─ReLU: 3-20                        [32, 128, 16, 16]         --
+│    │    └─MaxPool2d: 3-21                   [32, 128, 8, 8]           --
+├─ClassPredictor: 1-8                         [32, 8, 8, 8]             --
+│    └─Sequential: 2-8                        [32, 8, 8, 8]             --
+│    │    └─Conv2d: 3-22                      [32, 8, 8, 8]             9,224
+├─BBoxPredictor: 1-9                          [32, 16, 8, 8]            --
+│    └─Sequential: 2-9                        [32, 16, 8, 8]            --
+│    │    └─Conv2d: 3-23                      [32, 16, 8, 8]            18,448
+├─DownSamplingBlock: 1-10                     [32, 128, 4, 4]           --
+│    └─Sequential: 2-10                       [32, 128, 4, 4]           --
+│    │    └─Conv2d: 3-24                      [32, 128, 8, 8]           147,584
+│    │    └─BatchNorm2d: 3-25                 [32, 128, 8, 8]           256
+│    │    └─ReLU: 3-26                        [32, 128, 8, 8]           --
+│    │    └─Conv2d: 3-27                      [32, 128, 8, 8]           147,584
+│    │    └─BatchNorm2d: 3-28                 [32, 128, 8, 8]           256
+│    │    └─ReLU: 3-29                        [32, 128, 8, 8]           --
+│    │    └─MaxPool2d: 3-30                   [32, 128, 4, 4]           --
+├─ClassPredictor: 1-11                        [32, 8, 4, 4]             --
+│    └─Sequential: 2-11                       [32, 8, 4, 4]             --
+│    │    └─Conv2d: 3-31                      [32, 8, 4, 4]             9,224
+├─BBoxPredictor: 1-12                         [32, 16, 4, 4]            --
+│    └─Sequential: 2-12                       [32, 16, 4, 4]            --
+│    │    └─Conv2d: 3-32                      [32, 16, 4, 4]            18,448
+├─AdaptiveMaxPool2d: 1-13                     [32, 128, 1, 1]           --
+├─ClassPredictor: 1-14                        [32, 8, 1, 1]             --
+│    └─Sequential: 2-13                       [32, 8, 1, 1]             --
+│    │    └─Conv2d: 3-33                      [32, 8, 1, 1]             9,224
+├─BBoxPredictor: 1-15                         [32, 16, 1, 1]            --
+│    └─Sequential: 2-14                       [32, 16, 1, 1]            --
+│    │    └─Conv2d: 3-34                      [32, 16, 1, 1]            18,448
+===============================================================================================
+Total params: 1,010,376
+Trainable params: 1,010,376
+Non-trainable params: 0
+Total mult-adds (G): 31.38
+===============================================================================================
+Input size (MB): 25.17
+Forward/backward pass size (MB): 2063.57
+Params size (MB): 4.04
+Estimated Total Size (MB): 2092.78
+===============================================================================================
+        """
+        self.assertEqual(expected_output.strip(), act_output)
+
+    def test_ssd_training(self):
+        # hyperparameters
+        batch_size, learning_rate, num_epochs = 32, 0.2, 20
+        sizes = [[0.2, 0.272], [0.37, 0.447], [0.54, 0.619],
+                 [0.71, 0.79], [0.88, 0.961]]
+        ratios = [[1, 2, 0.5]] * 5
+        num_anchors = len(sizes[0]) + len(ratios[0]) - 1
+        train_iter, _ = load_data_bananas(batch_size)
+
+        device = dlf.devices()[0]
+        net = TinySSD(num_classes=1, sizes=sizes, ratios=ratios, num_anchors=num_anchors)
+        optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate, weight_decay=5e-4)
+        calc_loss = ObjectDetectionLossCalc()
+
+        train(net, train_iter, optimizer, calc_loss, num_epochs, device)
+
+        self.assertTrue(True)
 
 
 if __name__ == "__main__":
