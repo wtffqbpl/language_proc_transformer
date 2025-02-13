@@ -6,6 +6,7 @@ import unittest
 
 import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
 import pandas as pd
 import torchvision
 import sys
@@ -349,6 +350,131 @@ def multibox_detection(cls_probs, offset_preds, anchors, nms_threshold=0.5,
     return torch.stack(out)
 
 
+class ClassPredictor(nn.Module):
+    def __init__(self, num_inputs, num_anchors, num_classes):
+        super(ClassPredictor, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(num_inputs, num_anchors * (num_classes + 1), kernel_size=3, padding=1))
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# The design of the bounding box prediction layer is similar to that of the class
+# prediction layer. the only difference lies in the number of outputs for each anchor
+# box: here we need to predict four offsets rather than (q + 1) classes.
+class BBoxPredictor(nn.Module):
+    def __init__(self, num_inputs, num_anchors):
+        super(BBoxPredictor, self).__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(num_inputs, num_anchors * 4, kernel_size=3, padding=1))
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# Note that the channel dimension holds the predictions for anchor boxes with the
+# same center. We first move this dimension to the innermost. Since the batch size
+# remains the same for different scales, we can transform the prediction output into
+# a two-dimensional tensor with shape (batch_size, height, width, num_channels). Then
+# we can concatenate such outputs at different scales along dimension 1.
+# In this way, even though different preds have different sizes in channels, heights,
+# and widths, we can still concatenate these two prediction outputs at two different
+# scales for the same minibatch.
+def flatten_pred(pred):
+    return torch.flatten(pred.permute(0, 2, 3, 1), start_dim=1)
+
+
+def concat_preds(preds):
+    return torch.cat([flatten_pred(p) for p in preds], dim=1)
+
+
+class DownSamplingBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DownSamplingBlock, self).__init__()
+        blk = []
+        for _ in range(2):
+            blk.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1))
+            blk.append(nn.BatchNorm2d(out_channels))
+            blk.append(nn.ReLU())
+            in_channels = out_channels
+        blk.append(nn.MaxPool2d(2))
+
+        self.net = nn.Sequential(*blk)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+# The base network block is used to extract features from input images. For simplicity,
+# we construct a small base network consisting of three down-sampling blocks that double
+# the number of channels at each block.
+class BaseNetworkBlock(nn.Module):
+    def __init__(self):
+        super(BaseNetworkBlock, self).__init__()
+        blk = []
+        num_filters = [3, 16, 32, 64]
+        for i in range(len(num_filters) - 1):
+            blk.append(DownSamplingBlock(num_filters[i], num_filters[i + 1]))
+
+        self.net = nn.Sequential(*blk)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class TinySSD(nn.Module):
+    def __init__(self, num_classes, sizes, ratios, num_anchors, **kwargs):
+        super(TinySSD, self).__init__(**kwargs)
+
+        self.num_classes = num_classes
+        self.sizes = sizes
+        self.ratios = ratios
+        idx_to_in_channels = [64, 128, 128, 128, 128]
+
+        for i in range(5):
+            # Equivalent to the assignment statement 'self.blk_i = get_blk(i)
+            setattr(self, f'blk_{i}', self.get_blk(i))
+            setattr(self, f'cls_{i}', ClassPredictor(idx_to_in_channels[i],
+                                                     num_anchors, num_classes))
+            setattr(self, f'bbox_{i}', BBoxPredictor(idx_to_in_channels[i], num_anchors))
+
+    def forward(self, x):
+        default_classes = 5
+        anchors, cls_preds, bbox_preds = [None] * default_classes, [None] * default_classes, [None] * default_classes
+        for i in range(5):
+            # Here getattr(self, 'blk_%d' % i) accesses self.blk_i
+            x, anchors[i], cls_preds[i], bbox_preds[i] = self.blk_forward(
+                x, getattr(self, f'blk_{i}'), self.sizes[i], self.ratios[i],
+                getattr(self, f'cls_{i}'), getattr(self, f'bbox_{i}'))
+
+        anchors = torch.cat(anchors, dim=1)
+        cls_preds = concat_preds(cls_preds)
+        cls_preds = cls_preds.reshape(
+            cls_preds.shape[0], -1, self.num_classes + 1)
+        bbox_preds = concat_preds(bbox_preds)
+        return anchors, cls_preds, bbox_preds
+
+    @staticmethod
+    def get_blk(i):
+        blks = [
+            BaseNetworkBlock(),
+            DownSamplingBlock(64, 128),
+            DownSamplingBlock(128, 128),
+            DownSamplingBlock(128, 128),
+            nn.AdaptiveMaxPool2d((1, 1)),
+        ]
+        return blks[i]
+    
+    @staticmethod
+    def blk_forward(x, blk, size, ratio, cls_predictor, bbox_predictor):
+        y = blk(x)
+        anchors = multibox_prior(y, sizes=size, ratios=ratio)
+        cls_preds = cls_predictor(y)
+        bbox_preds = bbox_predictor(y)
+        return y, anchors, cls_preds, bbox_preds
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.img_path = os.path.join(str(Path(__file__).resolve().parent), 'catdog.png')
@@ -489,6 +615,55 @@ class IntegrationTest(unittest.TestCase):
 
         display_anchors(fmap_w=1, fmap_h=1, s=[0.8])
         plt.show()
+
+    def test_multiscale_prediction(self):
+        def forward(x, block):
+            return block(x)
+
+        # Let's assume that:
+        #   * generate 5 anchor boxes
+        #   * The number of object classes is 10.
+        y1 = forward(torch.zeros((2, 8, 20, 20)), ClassPredictor(8, 5, 10))
+        print(y1.shape)
+        # Then the numbers of channels in the class prediction output are
+        # 5 * (10 + 1) = 55
+        self.assertEqual(torch.Size([2, 55, 20, 20]), y1.shape)
+
+        # Let's assume that:
+        #   * generate 3 anchor boxes
+        #   * The number of object classes is 10.
+        y2 = forward(torch.zeros((2, 16, 10, 10)), ClassPredictor(16, 3, 10))
+        print(y2.shape)
+        # Then the numbers of channels in the class prediction output are
+        # 3 * (10 + 1) = 33
+        self.assertEqual(torch.Size([2, 33, 10, 10]), y2.shape)
+        
+        res = concat_preds([y1, y2])
+        print(res.shape)
+        self.assertEqual(torch.Size([2, 25300]), res.shape)
+
+        y = forward(torch.zeros((2, 3, 20, 20)), DownSamplingBlock(3, 10))
+        print(y.shape)
+        self.assertEqual(torch.Size([2, 10, 10, 10]), y.shape)
+
+        y = forward(torch.zeros((2, 3, 256, 256)), BaseNetworkBlock())
+        print(y.shape)
+        self.assertEqual(torch.Size([2, 64, 32, 32]), y.shape)
+
+    def test_tinyssd(self):
+        sizes = [[0.2, 0.272], [0.37, 0.447], [0.54, 0.619], [0.71, 0.79], [0.88, 0.961]]
+        ratios = [[1, 2, 0.5]] * 5
+        num_anchors = len(sizes[0]) + len(ratios[0]) - 1
+        net = TinySSD(num_classes=1, sizes=sizes, ratios=ratios, num_anchors=num_anchors)
+        x = torch.zeros((32, 3, 256, 256))
+        anchors, cls_preds, bbox_preds = net(x)
+
+        print('output anchors: ', anchors.shape)
+        print('output classes preds: ', cls_preds.shape)
+        print('output bbox preds: ', bbox_preds.shape)
+        self.assertEqual(torch.Size([1, 5444, 4]), anchors.shape)
+        self.assertEqual(torch.Size([32, 5444, 2]), cls_preds.shape)
+        self.assertEqual(torch.Size([32, 21776]), bbox_preds.shape)
 
 
 if __name__ == "__main__":
