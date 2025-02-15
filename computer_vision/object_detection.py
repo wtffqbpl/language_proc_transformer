@@ -8,6 +8,7 @@ from io import StringIO
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pandas as pd
 import torchvision
 import torchinfo
@@ -445,7 +446,12 @@ class TinySSD(nn.Module):
 
     def forward(self, x):
         default_classes = 5
-        anchors, cls_preds, bbox_preds = [None] * default_classes, [None] * default_classes, [None] * default_classes
+        # For depress the PyCharm warning
+        empty_tensor = torch.tenosr([])
+        anchors = [empty_tensor] * default_classes
+        cls_preds = [empty_tensor] * default_classes
+        bbox_preds = [empty_tensor] * default_classes
+
         for i in range(5):
             # Here getattr(self, 'blk_%d' % i) accesses self.blk_i
             x, anchors[i], cls_preds[i], bbox_preds[i] = self.blk_forward(
@@ -536,9 +542,22 @@ def train(net: nn.Module, train_iter, optimizer, calc_loss, num_epochs, device):
           f'{str(device)}')
 
 
+def display(img, output, threshold):
+    fig = ImageUtils.imshow(img)
+
+    for row in output:
+        score = float(row[1])
+        if score < threshold:
+            continue
+        h, w = img.shape[0:2]
+        bbox = [row[2:6] * torch.tensor((w, h, w, h), device=row.device)]
+        ImageUtils.show_boxes(fig.axes, bbox, ['%.2f' % score], ['w'])
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.img_path = os.path.join(str(Path(__file__).resolve().parent), 'catdog.png')
+        self.model_path = os.path.join(str(Path(__file__).resolve().parent), 'tiny_ssd.pth')
         pass
 
     def test_simple(self):
@@ -827,6 +846,30 @@ Estimated Total Size (MB): 2092.78
         calc_loss = ObjectDetectionLossCalc()
 
         train(net, train_iter, optimizer, calc_loss, num_epochs, device)
+
+        torch.save(net.state_dict(), self.model_path)
+
+    def test_ssd_inference(self):
+        device = dlf.devices()[0]
+        if not os.path.exists(self.model_path):
+            self.test_ssd_training()
+
+        net = torch.load(self.model_path).to(device=device)
+
+        def predict(x):
+            net.eval()
+            anchors, cls_preds, bbox_preds = net(x.to(device))
+            cls_probs = F.softmax(cls_preds, dim=2).permute(0, 2, 1)
+            output_ = multibox_detection(cls_probs, bbox_preds, anchors)
+            idx = [i for i, row in enumerate(output_[0]) if row[0] != -1]
+            return output_[0, idx]
+
+        data_dir = dlf.download_extract('banana-detection')
+        x = torchvision.io.read_image(os.path.join(data_dir, ''))
+        img = x.squeeze(0).permute(1, 2, 0).long()
+        output = predict(x)
+
+        display(img, output.cpu(), threshold=0.9)
 
         self.assertTrue(True)
 
