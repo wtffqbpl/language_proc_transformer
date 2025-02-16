@@ -10,6 +10,10 @@ import torch.utils.data as data
 import torchvision
 from torchvision import transforms
 import torchinfo
+from pathlib import Path
+import sys
+sys.path.append(str(Path(__file__).resolve().parent))
+import utils.dlf as dlf
 
 
 def load_fashion_mnist(batch_size, resize=None):
@@ -279,7 +283,7 @@ Estimated Total Size (MB): 244.50
         learning_rate = 0.05
         num_epochs = 10
         
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = dlf.devices()[0]
         
         net = AlexNetBN()
         net.to(device)

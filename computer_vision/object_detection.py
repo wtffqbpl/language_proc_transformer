@@ -455,7 +455,7 @@ class TinySSD(nn.Module):
     def forward(self, x):
         default_classes = 5
         # For depress the PyCharm warning
-        empty_tensor = torch.tenosr([])
+        empty_tensor = torch.tensor([])
         anchors = [empty_tensor] * default_classes
         cls_preds = [empty_tensor] * default_classes
         bbox_preds = [empty_tensor] * default_classes
@@ -855,14 +855,14 @@ Estimated Total Size (MB): 2092.78
 
         train(net, train_iter, optimizer, calc_loss, num_epochs, device)
 
-        torch.save(net.state_dict(), self.model_path)
+        torch.save(net, self.model_path)
 
     def test_ssd_inference(self):
         device = dlf.devices()[0]
         if not os.path.exists(self.model_path):
             self.test_ssd_training()
 
-        net = torch.load(self.model_path).to(device=device)
+        net = torch.load(self.model_path, weights_only=False).to(device=device)
 
         def predict(x):
             net.eval()
@@ -872,12 +872,14 @@ Estimated Total Size (MB): 2092.78
             idx = [i for i, row in enumerate(output_[0]) if row[0] != -1]
             return output_[0, idx]
 
-        data_dir = dlf.download_extract('banana-detection')
-        x = torchvision.io.read_image(os.path.join(data_dir, ''))
+        x = torchvision.io.read_image(os.path.join(str(Path(__file__).resolve().parent),
+                                                   'banana.jpg')).unsqueeze(0).float()
         img = x.squeeze(0).permute(1, 2, 0).long()
         output = predict(x)
 
         display(img, output.cpu(), threshold=0.9)
+
+        plt.show()
 
         self.assertTrue(True)
 

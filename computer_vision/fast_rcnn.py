@@ -44,7 +44,6 @@ class FastRCNN(nn.Module):
 
     def forward(self, images, rois):
         """
-
         :param images: Tensor, shape(N, 3, H, W)
         :param rois: Tensor, shape (num_rois, 5) [batch_idx, x1, y1, x2, y2] based on the original images.
         :return:
