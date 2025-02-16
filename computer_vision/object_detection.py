@@ -428,6 +428,14 @@ class BaseNetworkBlock(nn.Module):
         return self.net(x)
 
 
+# Single shot multibox detection is a multiscale object detection model. Via its
+# base network and several multiscale feature map blocks, single-shot multibox
+# detection generates a varying number of anchor boxes with different sizes,
+# and detects varying-size objects by predicting classes and offsets of these
+# anchors boxes (thus the bounding boxes).
+# When training the single-shot multibox detection model, the loss function is
+# calculated based on the predicted and labeled values of the anchor box classes
+# and offsets.
 class TinySSD(nn.Module):
     def __init__(self, num_classes, sizes, ratios, num_anchors, **kwargs):
         super(TinySSD, self).__init__(**kwargs)
@@ -871,6 +879,50 @@ Estimated Total Size (MB): 2092.78
 
         display(img, output.cpu(), threshold=0.9)
 
+        self.assertTrue(True)
+
+    def test_smooth_loss_function(self):
+        def smooth_l1(data, scalar):
+            out = []
+            for i in data:
+                if abs(i) < 1 / (scalar ** 2):
+                    out.append(((scalar * i) ** 2) / 2)
+                else:
+                    out.append(abs(i) - 0.5 / (scalar ** 2))
+            return torch.tensor(out)
+
+        sigmas = [10, 1, 0.5]
+        lines = ['-', '--', '-.']
+        x = torch.arange(-2, 2, 0.1)
+
+        for l, s in zip(lines, sigmas):
+            y = smooth_l1(x, scalar=s)
+            plt.plot(x, y, l, label='sigma=%.1f' % s)
+        plt.legend()
+        plt.show()
+
+        self.assertTrue(True)
+
+    def test_focal_loss(self):
+        # In the experiment, we use cross-entropy loss for class prediction: denoting
+        # by p_j the predicted probability for the ground-truth class j, the cross-entropy
+        # loss is (-log(p_j)). We can also use the focal loss:
+        #            -alpha * (1 - p_j)^gamma * log(p_j)
+        # As we can see, increasing gamma can effectively reduce the relative loss
+        # for well-classified examples (e.g., p_j > 0.5) so the training can focus
+        # more on those difficult examples that are mis-classified.
+
+        def focal_loss(gamma, x):
+            return -(1 - x) ** gamma * torch.log(x)
+
+        lines = ['-', '--', '-.']
+        x = torch.arange(0.01, 1, 0.01)
+
+        for l, gamma in zip(lines, [0, 1, 5]):
+            plt.plot(x, focal_loss(gamma, x), l, label='gamma=%.1f' % gamma)
+        plt.legend()
+
+        plt.show()
         self.assertTrue(True)
 
 
