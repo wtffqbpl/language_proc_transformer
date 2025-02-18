@@ -77,15 +77,16 @@ def train(model: nn.Module, train_iter: DataLoader,
 class IntegrationTest(unittest.TestCase):
     def setUp(self):
         self.markov_model_path = os.path.join(str(Path(__file__).resolve().parent), 'markvo_net.pth')
+
         self.tau = 4
+        self.n_train = 600
+        self.num_samples = 1000
+        self.time = torch.arange(1, self.num_samples + 1, dtype=torch.float32)
+        self.x = torch.sin(0.01 * self.time) + torch.normal(0, 0.2, (self.num_samples,))
 
-        num_samples = 1000
-        self.time = torch.arange(1, num_samples + 1, dtype=torch.float32)
-        self.x = torch.sin(0.01 * self.time) + torch.normal(0, 0.2, (num_samples,))
-
-        self.features = torch.zeros((num_samples - self.tau, self.tau))
+        self.features = torch.zeros((self.num_samples - self.tau, self.tau))
         for i in range(self.tau):
-            self.features[:, i] = self.x[i: num_samples - self.tau + i]
+            self.features[:, i] = self.x[i: self.num_samples - self.tau + i]
         self.labels = self.x[self.tau:].reshape((-1, 1))
 
         plot(self.time, [self.x], 'time', 'x', xlim=[1, 1000], figsize=(6, 3))
@@ -93,9 +94,9 @@ class IntegrationTest(unittest.TestCase):
     def test_markov_model_training(self):
 
         # hyperparameters
-        batch_size, n_train = 16, 600
+        batch_size = 600
         epochs, learning_rate = 10, 0.01
-        train_iter = load_array((self.features[:n_train], self.labels[:n_train]),
+        train_iter = load_array((self.features[:self.n_train], self.labels[:self.n_train]),
                                 batch_size, is_train=True)
 
         model = MarkovNet(tau=self.tau)
@@ -119,11 +120,42 @@ class IntegrationTest(unittest.TestCase):
         model = torch.load(self.markov_model_path, weights_only=False)
         model.to(device=device)
 
-        oenstep_preds = model(self.features.to(device=device))
+        onestep_preds = model(self.features.to(device=device))
 
+        # Plot 1-step results
         plot([self.time, self.time[self.tau:]],
-             [self.x.detach().numpy(), oenstep_preds.detach().cpu().numpy()], 'time',
+             [self.x.detach().numpy(), onestep_preds.detach().cpu().numpy()], 'time',
              'x', legend=['data', '1-step preds'], xlim=[1, 1000], figsize=(6, 3))
+
+        multistep_preds = torch.zeros(self.num_samples, device=device)
+        multistep_preds[: self.n_train + self.tau] = self.x[: self.n_train + self.tau]
+        for i in range(self.n_train + self.tau, self.num_samples):
+            multistep_preds[i] = model(multistep_preds[i - self.tau:i].reshape((1, -1)))
+
+        # Plot multi-step results
+        plot([self.time, self.time[self.tau:], self.time[self.n_train + self.tau:]],
+             [self.x.detach().numpy(), onestep_preds.detach().cpu().numpy(),
+              multistep_preds[self.n_train + self.tau:].detach().cpu().numpy()],
+             'time', 'x', legend=['data', '1-step preds', 'multistep preds'],
+             xlim=[1, 1000], figsize=(6, 3))
+
+        def k_step_pred(k):
+            features = []
+            for i in range(self.tau):
+                features.append(self.x[i: i + self.num_samples - self.tau - k + 1].to(device=device))
+
+            # The (i+tau)-th element stores the (i+1)-step-ahead predictions
+            for i in range(k):
+                preds = model(torch.stack(features[i: i+self.tau], 1))
+                features.append(preds.reshape(-1))
+            return features[self.tau:]
+
+        steps = (1, 4, 16, 64)
+        preds = k_step_pred(steps[-1])
+        plot(self.time[self.tau + steps[-1]-1:],
+             [preds[k - 1].detach().cpu().numpy() for k in steps],
+             'time', 'x', legend=[f'{i}-step preds' for i in steps],
+             xlim=[5, 1000], figsize=(6, 3))
 
         self.assertTrue(True)
 
