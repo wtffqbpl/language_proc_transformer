@@ -7,6 +7,7 @@ import re
 import torch
 import sys
 from pathlib import Path
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import utils.dlf as dlf
 
@@ -69,9 +70,13 @@ class Vocab:
 
         for token, freq in self.token_freqs:
             if freq < min_freq:
+                # Use break since tokens are ordered. If one is below threshold, the rest will be too low.
                 break
+
             if token not in self.token_to_idx:
                 self.idx_to_token.append(token)
+                # We add the token to the dictionary and update the index sequentially, so the
+                # current token index is always `len(self.idx_to_token) - 1`.
                 self.token_to_idx[token] = len(self.idx_to_token) - 1
 
     def __len__(self):
@@ -79,6 +84,8 @@ class Vocab:
 
     def __getitem__(self, tokens):
         if not isinstance(tokens, (list, tuple)):
+            # If `tokens` is not a valid key, return the index for the unknown token.
+            # The dict().get() method can be used to specify a default value (the second parameters).
             return self.token_to_idx.get(tokens, self.unk)
         return [self.__getitem__(token) for token in tokens]
 
@@ -123,7 +130,10 @@ class IntegrationTest(unittest.TestCase):
         lines = TimeMachine().download()
         tokens = Tokenizer().tokenize(lines)
         vocab = Vocab(tokens)
-        indices = vocab[tokens[:10]]
+
+        # Print the ten most frequent words in the vocabulary
+        print(list(vocab.token_to_idx.items())[:10])
+
         for i in [0, 10]:
             print('indices: ', tokens[i])
             print('words: ', vocab[tokens[i]])
