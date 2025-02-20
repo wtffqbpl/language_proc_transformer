@@ -4,6 +4,7 @@ import collections
 import random
 import re
 import torch
+import torch.nn as nn
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -183,3 +184,15 @@ def load_data_time_machine(batch_size, num_steps, use_random_iter=False, max_tok
     """ Load the time machine dataset """
     data_iter = SeqDataLoader(batch_size, num_steps, use_random_iter, max_tokens)
     return data_iter, data_iter.vocab
+
+
+def grad_clipping(net, theta) -> None:
+    """ Clipping gradients """
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm

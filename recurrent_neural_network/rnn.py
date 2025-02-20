@@ -7,6 +7,10 @@ import torch.optim as optim
 from torch.utils import data
 from utils.plot import plot
 from utils.accumulator import Accumulator
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import utils.dlf as dlf
 
 
 def load_array(data_arrays, batch_size, is_train=True):
@@ -90,6 +94,27 @@ class IntegrationTest(unittest.TestCase):
              figsize=(6, 3))
 
         self.assertTrue(True)
+
+    def test_rnn_module(self):
+        device = dlf.devices()[0]
+        print(device)
+        # x.shape = (batch_size, num_steps)
+        # w_xh.shape = (batch_size, num_hiddens)
+        # h.shape = (batch_size, num_hiddens)
+        # w_hh.shape = (num_hiddens, num_hiddens)
+        batch_size, num_steps, num_hiddens = 3, 1, 4
+        x = torch.normal(0, 1, (batch_size, num_steps)).to(device=device)
+        w_xh = torch.normal(0, 1, (num_steps, num_hiddens)).to(device=device)
+        h = torch.normal(0, 1, (batch_size, num_hiddens)).to(device=device)
+        w_hh = torch.normal(0, 1, (num_hiddens, num_hiddens)).to(device=device)
+        res = torch.matmul(x, w_xh) + torch.matmul(h, w_hh)
+        self.assertEqual(torch.Size([batch_size, num_hiddens]), res.shape)
+        print(res)
+
+        res = torch.matmul(torch.cat((x, h), dim=1), torch.cat((w_xh, w_hh), dim=0))
+        print(res)
+
+        self.assertEqual(torch.Size([batch_size, num_hiddens]), res.shape)
 
 
 if __name__ == "__main__":
