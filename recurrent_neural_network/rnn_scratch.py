@@ -9,8 +9,10 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from recurrent_neural_network.rnn_utils import load_data_time_machine, Vocab
+from recurrent_neural_network.rnn_utils import load_data_time_machine, Vocab, grad_clipping
 import utils.dlf as dlf
+from utils.accumulator import Accumulator
+from utils.timer import Timer
 
 
 def get_params(vocab_size, num_hiddens, device):
@@ -71,7 +73,7 @@ class RNNModelScratch:
 
 def inference(prefix, num_preds, net, vocab, device):
     """Generate new characters following the `prefix` """
-    state = net.begin_state(batch_size=1, devic=device)
+    state = net.begin_state(batch_size=1, device=device)
     outputs = [vocab[prefix[0]]]
 
     get_inputs = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
@@ -84,6 +86,65 @@ def inference(prefix, num_preds, net, vocab, device):
         y, state = net(get_inputs(), state)
         outputs.append(int(y.argmax(dim=1).reshape(1)))
     return ''.join([vocab.idx_to_token[i] for i in outputs])
+
+
+def train_epoch(net, train_iter, loss_fn, updater, device, use_random_iter):
+    state, timer = None, Timer()
+    metric = Accumulator(2)  # training loss, num tokens
+
+    for X, Y in train_iter:
+        if state is None or use_random_iter:
+            # Initialize `state` when either it is the first iteration or using random sampling
+            state = net.begin_state(batch_size=X.shape[0], device=device)
+        else:
+            if isinstance(net, nn.Module) and not isinstance(state, tuple):
+                # `state` is a tensor for `nn.GRU`
+                state.detach_()
+            else:
+                # state is a tuple for `nn.LSTM` and `nn.RNN`
+                for s in state:
+                    s.detach_()
+
+        y = Y.T.reshape(-1)
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss_fn(y_hat, y.long()).mean()
+
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater(batch_size=1)
+        metric.add(l * y.numel(), y.numel())
+
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+
+
+def train(net, train_iter, vocab, loss_fn, lr, num_epochs, device, use_random_iter=False):
+    """ Train model"""
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda batch_size: dlf.sgd(net.params, lr, batch_size)
+
+    predict = lambda prefix: inference(prefix, 50, net, vocab, device)
+
+    ppl, speed = None, None
+    # training and validation
+    for epoch in range(num_epochs):
+        ppl, speed = train_epoch(net, train_iter, loss_fn, updater, device, use_random_iter)
+
+        if (epoch + 1) % 10 == 0:
+            print(f'epoch {epoch + 1}, ', f'perplexity {ppl:.1f}, ',
+                  f'speed {speed:.1f} tokens/sec, {str(device)}, ')
+
+    print(f'perplexity {ppl:.1f}, ', f'speed {speed:.1f} tokens/sec, {str(device)}')
+    print(predict("time traveller "))
+    print(predict('traveller'))
 
 
 class IntegrationTest(unittest.TestCase):
@@ -135,6 +196,29 @@ class IntegrationTest(unittest.TestCase):
 
         print(new_state[0].shape)
         self.assertEqual(torch.Size([2, 512]), new_state[0].shape)
+
+    def test_inference(self):
+        num_hiddens = 512
+        device = dlf.devices()[0]
+        net = RNNModelScratch(len(self.vocab), num_hiddens, device,
+                              get_params_fn=get_params,
+                              init_state_fn=init_rnn_state,
+                              forward_fn=rnn)
+
+        res = inference('time traveller', 10, net, self.vocab, dlf.devices()[0])
+
+        print(res)
+
+    def test_training(self):
+        num_hiddens, num_epochs, lr = 512, 500, 1
+
+        loss_fn = torch.nn.CrossEntropyLoss()
+        device = dlf.devices()[0]
+        net = RNNModelScratch(len(self.vocab), num_hiddens, device,
+                              get_params_fn=get_params,
+                              init_state_fn=init_rnn_state,
+                              forward_fn=rnn)
+        train(net, self.train_iter, self.vocab, loss_fn, lr, num_epochs, device)
 
 
 if __name__ == "__main__":
