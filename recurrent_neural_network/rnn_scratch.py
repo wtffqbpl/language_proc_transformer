@@ -140,11 +140,47 @@ def train(net, train_iter, vocab, loss_fn, lr, num_epochs, device, use_random_it
 
         if (epoch + 1) % 10 == 0:
             print(f'epoch {epoch + 1}, ', f'perplexity {ppl:.1f}, ',
-                  f'speed {speed:.1f} tokens/sec, {str(device)}, ')
+                  f'speed {speed:.1f} tokens/sec, {str(device)}, ',
+                  predict('time traveller'))
 
     print(f'perplexity {ppl:.1f}, ', f'speed {speed:.1f} tokens/sec, {str(device)}')
     print(predict("time traveller "))
     print(predict('traveller'))
+
+
+class RNNModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
+        super(RNNModel, self).__init__()
+
+        # Using nn.RNN to construct recurrent neural network.
+        # batch_first=True means that the input shape is [batch, seq_length, feature_dim]
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        # The dense layer, mapping the RNN output to the corresponding target output dims
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # The x.shape = [batch_size, seq_length, input_size]
+        out, hidden = self.rnn(x)
+        # Use the result of the last time step, and use the dense layer to get the last output
+        out = self.fc(out[:, -1, :])
+        return out
+
+
+# Generate random dataset, and the regression target is the sum of the sequence
+def generate_data(num_samples, seq_length, input_size):
+    # Generate the random dataset, the shape is [num_samples, seq_length, input_size]
+    x = torch.randn(num_samples, seq_length, input_size)
+    # The y.shape = [num_samples, 1]
+    y = x.sum(dim=1).sum(dim=1, keepdim=True)
+    return x, y
+
+
+def load_pesudo_dataset(batch_size, num_samples, seq_length, input_size):
+
+    train_x, train_y = generate_data(num_samples, seq_length, input_size)
+    train_dataset = torch.utils.data.TensorDataset(train_x, train_y)
+    train_iter = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size)
+    return train_iter
 
 
 class IntegrationTest(unittest.TestCase):
@@ -218,7 +254,53 @@ class IntegrationTest(unittest.TestCase):
                               get_params_fn=get_params,
                               init_state_fn=init_rnn_state,
                               forward_fn=rnn)
+
+        # Sequential sampling
         train(net, self.train_iter, self.vocab, loss_fn, lr, num_epochs, device)
+
+        # Random sampling
+        train(net, self.train_iter, self.vocab, loss_fn, lr, num_epochs, device,
+              use_random_iter=True)
+
+    def test_rnn_model(self):
+        input_size = 10
+        hidden_size = 20
+        output_size = 1
+        num_layers = 1
+        num_epochs = 10
+        batch_size = 16
+        seq_length = 5
+        learning_rate = 0.01
+        num_samples = 1000
+
+        train_iter = load_pesudo_dataset(batch_size, num_samples, seq_length, input_size)
+        model = RNNModel(input_size, hidden_size, output_size, num_layers)
+        loss_fn = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr = learning_rate)
+
+        # Training
+        model.train()
+        for epoch in range(num_epochs):
+            epoch_loss = 0.0
+            for i, (x, y) in enumerate(train_iter):
+                optimizer.zero_grad()
+                output = model(x)
+                loss = loss_fn(output, y)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+            print(f'epoch: [{epoch+1}/{num_epochs}], ',
+                  f'loss: {epoch_loss/len(train_iter):.4f}')
+
+        # inference
+        model.eval()
+        x, y = generate_data(5, seq_length, input_size)
+        with torch.no_grad():
+            predictions = model(x)
+            print('predictions: ', predictions)
+            print('actual results: ', y)
+
 
 
 if __name__ == "__main__":
