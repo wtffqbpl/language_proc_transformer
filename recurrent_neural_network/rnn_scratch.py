@@ -5,6 +5,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 import sys
 from pathlib import Path
 
@@ -301,6 +305,146 @@ class IntegrationTest(unittest.TestCase):
             print('predictions: ', predictions)
             print('actual results: ', y)
 
+
+# Custom dataset
+class TimeSeriesDataset(Dataset):
+    def __init__(self, x, y):
+        self.x = torch.tensor(x, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
+
+
+def load_data_iters(batch_size, x_train, x_test, y_train, y_test):
+    train_dataset = TimeSeriesDataset(x_train, y_train)
+    train_iter = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    test_dataset = TimeSeriesDataset(x_test, y_test)
+    test_iter = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    return train_iter, test_iter
+
+
+class RNNForecast(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers = 1, output_size=1):
+        super(RNNForecast, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        # RNN layer. The input shape: [batch, seq_length, input_size]
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+
+        # Fully connected layer. The output shape: [batch, seq_length, output_size]
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # The x shape is [batch, seq_length]
+        # Add the channel dimension
+        x = x.unsqueeze(-1)
+        # The RNN output
+        out, _ = self.rnn(x)
+        # The last time step output
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out.squeeze()
+
+
+def forcast_train(model: nn.Module, train_iter, loss_fn, optimizer, num_epochs, device):
+    model.to(device=device)
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0.0
+
+        for x, y in train_iter:
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad()
+            output = model(x)
+            loss = loss_fn(output, y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * x.size(0)
+
+        total_loss /= len(train_iter.dataset)
+        if (epoch + 1) % 10 == 0:
+            print(f'epoch: {epoch+1}, loss: {total_loss:.4f}')
+
+
+def forecast_inference(model: nn.Module, test_iter, device):
+    model.to(device=device)
+
+    model.eval()
+    preds, actuals = [], []
+    with torch.no_grad():
+        for x, y in test_iter:
+            x, y = x.to(device), y.to(device)
+            output = model(x)
+            preds.append(output.detach().cpu().numpy())
+            actuals.append(y.detach().cpu().numpy())
+
+    preds = np.concatenate(preds)
+    actuals = np.concatenate(actuals)
+    test_loss = np.mean((preds - actuals) ** 2)
+    print(f'test loss: {test_loss:.4f}')
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(actuals, label='Actual')
+    plt.plot(preds, label='Predicted')
+    plt.title("RNN Forecast on Airline Passengers (Normalized)")
+    plt.legend()
+    plt.show()
+
+
+class PassagersTest(unittest.TestCase):
+    def test_passagers_forecast(self):
+        url = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/airline-passengers.csv"
+        df = pd.read_csv(url, parse_dates=['Month'])
+        print(df.head())
+
+        # Just using the number of passengers as the target.
+        data = df['Passengers'].values.astype(np.float32)
+
+        # Normalize the data (var=0, mean=0)
+        data_mean = np.mean(data)
+        data_std = np.std(data)
+        data_normalized = (data - data_mean) / data_std
+
+        # Generate time sequence: using the previous seq_length to predict the next value
+        seq_length = 12
+
+        def create_sequence(data_, seq_length_):
+            xs, ys = [], []
+
+            for i in range(len(data_) - seq_length_):
+                x = data_[i:i+seq_length_]
+                y = data_[i+seq_length_]
+                xs.append(x)
+                ys.append(y)
+            return np.array(xs), np.array(ys)
+
+        x, y = create_sequence(data_normalized, seq_length)
+        print("x.shape: ", x.shape)  # (num_samples, seq_length)
+        print("y.shape: ", y.shape)  # (num_samples, )
+
+        # Split the dataset into training and validation
+        train_size = int(len(x) * 0.8)
+        x_train, y_valid = x[:train_size], y[:train_size]
+        x_test, y_test = x[train_size:], y[train_size:]
+
+        batch_size, learning_rate = 16, 0.01
+        device = dlf.devices()[0]
+
+        train_iter, test_iter = load_data_iters(batch_size, x_train, x_test, y_valid, y_test)
+        model = RNNForecast()
+        loss_fn = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+        forcast_train(model, train_iter, loss_fn, optimizer, 100, device)
+
+        forecast_inference(model, test_iter, device)
 
 
 if __name__ == "__main__":
