@@ -398,7 +398,7 @@ def forecast_inference(model: nn.Module, test_iter, device):
     plt.show()
 
 
-class PassagersTest(unittest.TestCase):
+class PassangersTest(unittest.TestCase):
     def test_passagers_forecast(self):
         url = "https://raw.githubusercontent.com/jbrownlee/Datasets/master/airline-passengers.csv"
         df = pd.read_csv(url, parse_dates=['Month'])
@@ -445,6 +445,78 @@ class PassagersTest(unittest.TestCase):
         forcast_train(model, train_iter, loss_fn, optimizer, 100, device)
 
         forecast_inference(model, test_iter, device)
+
+
+class RNNModelWithTorch(nn.Module):
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        super(RNNModelWithTorch, self).__init__(**kwargs)
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+
+        # If RNN is bidirectional, num_directions should be 2, else it should be 1
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(self.num_hiddens, vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, vocab_size)
+
+    def forward(self, inputs, state):
+        x = F.one_hot(inputs.T.long(), self.vocab_size).type(torch.float32)
+        y, state = self.rnn(x, state)
+
+        # The shape of `y` is (num_steps, batch_size, num_hiddens).
+        # Here we only use the output of the last time step
+        output = self.linear(y.reshape(-1, y.shape[-1]))
+        return output, state
+
+    def begin_state(self, device, batch_size=1):
+        if not isinstance(self.rnn, nn.LSTM):
+            # `nn.GRU` takes a tensor as hidden state
+            return torch.zeros(
+                (self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens),
+                device=device)
+        else:
+            # `nn.LSTM` takes a tuple of hidden states
+            return (torch.zeros((
+                self.num_directions * self.rnn.num_layers,
+                batch_size, self.num_hiddens), device=device),
+                    torch.zeros((
+                        self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens), device=device))
+
+
+class RNNTorchAPITest(unittest.TestCase):
+    def test_rnn_torch_api(self):
+        batch_size, num_steps = 32, 35
+        train_iter, vocab = load_data_time_machine(batch_size, num_steps)
+
+        num_hiddens = 256
+        rnn_layer = nn.RNN(input_size=len(vocab), hidden_size=num_hiddens)
+
+        state = torch.zeros((1, batch_size, num_hiddens))
+        print(state.shape)
+
+        x = torch.rand(size=(num_steps, batch_size, len(vocab)))
+        y, state_new = rnn_layer(x, state)
+        print(y.shape)
+        print(state_new.shape)
+
+        device = dlf.devices()[0]
+        net = RNNModelWithTorch(rnn_layer, vocab_size=len(vocab))
+        net = net.to(device=device)
+        # Inference before training
+        print('Inference before training')
+        inference('time traveller', 10, net, vocab, device)
+
+        # Training
+        num_epochs, learning_rate = 500, 1
+        train(net, train_iter, vocab, nn.CrossEntropyLoss(), learning_rate, num_epochs, device)
+
+        # Inference after training
+        print('Inference after training')
+        inference('time traveller', 10, net, vocab, device)
 
 
 if __name__ == "__main__":
