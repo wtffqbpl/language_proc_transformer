@@ -1,11 +1,14 @@
 #! coding: utf-8
 
 import unittest
+from unittest.mock import patch
+from io import StringIO
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import torchinfo
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,10 +16,8 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from recurrent_neural_network.rnn_utils import load_data_time_machine, Vocab, grad_clipping
+from recurrent_neural_network.rnn_utils import load_data_time_machine, Vocab, grad_clipping, RNNModelScratch, train
 import utils.dlf as dlf
-from utils.accumulator import Accumulator
-from utils.timer import Timer
 
 
 def get_params(vocab_size, num_hiddens, device):
@@ -56,100 +57,6 @@ def rnn(inputs, state, params):
         y = torch.mm(h, w_hq) + b_q
         outputs.append(y)
     return torch.cat(outputs, dim=0), (h,)
-
-
-class RNNModelScratch:
-    def __init__(self, vocab_size, num_hiddens, device,
-                 get_params_fn, init_state_fn, forward_fn):
-        self.vocab_size = vocab_size
-        self.num_hiddens = num_hiddens
-        self.params = get_params_fn(vocab_size, num_hiddens, device)
-        self.init_state = init_state_fn
-        self.forward_fn = forward_fn
-
-    def __call__(self, x, state):
-        x = F.one_hot(x.T, self.vocab_size).type(torch.float32)
-        return self.forward_fn(x, state, self.params)
-
-    def begin_state(self, batch_size, device):
-        return self.init_state(batch_size, self.num_hiddens, device)
-
-
-def inference(prefix, num_preds, net, vocab, device):
-    """Generate new characters following the `prefix` """
-    state = net.begin_state(batch_size=1, device=device)
-    outputs = [vocab[prefix[0]]]
-
-    get_inputs = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
-
-    for y in prefix[1:]:  # Warm-up period
-        _, state = net(get_inputs(), state)
-        outputs.append(vocab[y])
-
-    for _ in range(num_preds):  # Predict `num_preds` steps
-        y, state = net(get_inputs(), state)
-        outputs.append(int(y.argmax(dim=1).reshape(1)))
-    return ''.join([vocab.idx_to_token[i] for i in outputs])
-
-
-def train_epoch(net, train_iter, loss_fn, updater, device, use_random_iter):
-    state, timer = None, Timer()
-    metric = Accumulator(2)  # training loss, num tokens
-
-    for X, Y in train_iter:
-        if state is None or use_random_iter:
-            # Initialize `state` when either it is the first iteration or using random sampling
-            state = net.begin_state(batch_size=X.shape[0], device=device)
-        else:
-            if isinstance(net, nn.Module) and not isinstance(state, tuple):
-                # `state` is a tensor for `nn.GRU`
-                state.detach_()
-            else:
-                # state is a tuple for `nn.LSTM` and `nn.RNN`
-                for s in state:
-                    s.detach_()
-
-        y = Y.T.reshape(-1)
-        X, y = X.to(device), y.to(device)
-        y_hat, state = net(X, state)
-        l = loss_fn(y_hat, y.long()).mean()
-
-        if isinstance(updater, torch.optim.Optimizer):
-            updater.zero_grad()
-            l.backward()
-            grad_clipping(net, 1)
-            updater.step()
-        else:
-            l.backward()
-            grad_clipping(net, 1)
-            updater(batch_size=1)
-        metric.add(l * y.numel(), y.numel())
-
-    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
-
-
-def train(net, train_iter, vocab, loss_fn, lr, num_epochs, device, use_random_iter=False):
-    """ Train model"""
-    if isinstance(net, nn.Module):
-        updater = torch.optim.SGD(net.parameters(), lr)
-    else:
-        updater = lambda batch_size: dlf.sgd(net.params, lr, batch_size)
-
-    predict = lambda prefix: inference(prefix, 50, net, vocab, device)
-
-    ppl, speed = None, None
-    # training and validation
-    for epoch in range(num_epochs):
-        ppl, speed = train_epoch(net, train_iter, loss_fn, updater, device, use_random_iter)
-
-        if (epoch + 1) % 10 == 0:
-            print(f'epoch {epoch + 1}, ', f'perplexity {ppl:.1f}, ',
-                  f'speed {speed:.1f} tokens/sec, {str(device)}, ',
-                  predict('time traveller'))
-
-    print(f'perplexity {ppl:.1f}, ', f'speed {speed:.1f} tokens/sec, {str(device)}')
-    print(predict("time traveller "))
-    print(predict('traveller'))
 
 
 class RNNModel(nn.Module):
@@ -506,6 +413,12 @@ class RNNTorchAPITest(unittest.TestCase):
         device = dlf.devices()[0]
         net = RNNModelWithTorch(rnn_layer, vocab_size=len(vocab))
         net = net.to(device=device)
+
+        act_output = None
+        with patch('sys.stdout', new=StringIO()) as fake_out:
+            act_output = torchinfo.summary(net, input_size=(batch_size, num_steps), device=device)
+        print(act_output)
+
         # Inference before training
         print('Inference before training')
         inference('time traveller', 10, net, vocab, device)
