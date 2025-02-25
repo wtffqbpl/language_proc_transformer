@@ -201,6 +201,64 @@ def grad_clipping(net, theta) -> None:
             param.grad[:] *= theta / norm
 
 
+class RNNModelWithTorch(nn.Module):
+    def __init__(self, rnn_layer, vocab_size, **kwargs):
+        super(RNNModelWithTorch, self).__init__(**kwargs)
+        self.rnn = rnn_layer
+        self.vocab_size = vocab_size
+        self.num_hiddens = self.rnn.hidden_size
+
+        # If RNN is bidirectional, num_directions should be 2, else it should be 1
+        if not self.rnn.bidirectional:
+            self.num_directions = 1
+            self.linear = nn.Linear(self.num_hiddens, vocab_size)
+        else:
+            self.num_directions = 2
+            self.linear = nn.Linear(self.num_hiddens * 2, vocab_size)
+
+    def forward(self, inputs, state):
+        x = torch.nn.functional.one_hot(inputs.T.long(), self.vocab_size).type(torch.float32)
+        y, state = self.rnn(x, state)
+
+        # The shape of `y` is (num_steps, batch_size, num_hiddens).
+        # Here we only use the output of the last time step
+        output = self.linear(y.reshape(-1, y.shape[-1]))
+        return output, state
+
+    def begin_state(self, device, batch_size=1):
+        if not isinstance(self.rnn, nn.LSTM):
+            # `nn.GRU` takes a tensor as hidden state
+            return torch.zeros(
+                (self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens),
+                device=device)
+        else:
+            # `nn.LSTM` takes a tuple of hidden states
+            return (torch.zeros((
+                self.num_directions * self.rnn.num_layers,
+                batch_size, self.num_hiddens), device=device),
+                    torch.zeros((
+                        self.num_directions * self.rnn.num_layers,
+                        batch_size, self.num_hiddens), device=device))
+
+
+class RNNModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
+        super(RNNModel, self).__init__()
+
+        # Using nn.RNN to construct recurrent neural network.
+        # batch_first=True means that the input shape is [batch, seq_length, feature_dim]
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
+        # The dense layer, mapping the RNN output to the corresponding target output dims
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # The x.shape = [batch_size, seq_length, input_size]
+        out, hidden = self.rnn(x)
+        # Use the result of the last time step, and use the dense layer to get the last output
+        out = self.fc(out[:, -1, :])
+        return out
+
+
 class RNNModelScratch:
     def __init__(self, vocab_size, num_hiddens, device,
                  get_params_fn, init_state_fn, forward_fn):

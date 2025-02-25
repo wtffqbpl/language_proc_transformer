@@ -6,7 +6,7 @@ import torch.nn as nn
 import sys
 import pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
-from recurrent_neural_network.rnn_utils import load_data_time_machine, RNNModelScratch, train
+from recurrent_neural_network.rnn_utils import load_data_time_machine, RNNModelScratch, RNNModelWithTorch, train
 import utils.dlf as dlf
 
 
@@ -72,6 +72,24 @@ class IntegrationTest(unittest.TestCase):
         train(model, train_iter, vocab, loss_fn, learning_rate, num_epochs, device, use_random_iter=True)
 
         self.assertTrue(True)
+
+    def test_gru_pytorch_api(self):
+        device = dlf.devices()[0]
+        batch_size, num_steps = 32, 35
+        train_iter, vocab = load_data_time_machine(batch_size, num_steps, use_random_iter=True)
+
+        vocab_size, num_hiddens = len(vocab), 256
+
+        num_epochs, learning_rate = 500, 1
+        input_size = output_size = vocab_size
+        num_layers, output_size, hidden_size = 1, 1, 20
+
+        num_inputs = vocab_size
+        gru_layer = nn.GRU(num_inputs, num_hiddens)
+        model = RNNModelWithTorch(gru_layer, vocab_size).to(device=device)
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        train(model, train_iter, vocab, loss_fn, learning_rate, num_epochs, device)
 
 
 if __name__ == '__main__':

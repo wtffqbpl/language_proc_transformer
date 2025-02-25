@@ -16,7 +16,8 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from recurrent_neural_network.rnn_utils import load_data_time_machine, Vocab, grad_clipping, RNNModelScratch, train
+from recurrent_neural_network.rnn_utils import load_data_time_machine,\
+    RNNModelScratch, train, RNNModel, inference, RNNModelWithTorch
 import utils.dlf as dlf
 
 
@@ -57,24 +58,6 @@ def rnn(inputs, state, params):
         y = torch.mm(h, w_hq) + b_q
         outputs.append(y)
     return torch.cat(outputs, dim=0), (h,)
-
-
-class RNNModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=1):
-        super(RNNModel, self).__init__()
-
-        # Using nn.RNN to construct recurrent neural network.
-        # batch_first=True means that the input shape is [batch, seq_length, feature_dim]
-        self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first=True)
-        # The dense layer, mapping the RNN output to the corresponding target output dims
-        self.fc = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        # The x.shape = [batch_size, seq_length, input_size]
-        out, hidden = self.rnn(x)
-        # Use the result of the last time step, and use the dense layer to get the last output
-        out = self.fc(out[:, -1, :])
-        return out
 
 
 # Generate random dataset, and the regression target is the sum of the sequence
@@ -352,46 +335,6 @@ class PassangersTest(unittest.TestCase):
         forcast_train(model, train_iter, loss_fn, optimizer, 100, device)
 
         forecast_inference(model, test_iter, device)
-
-
-class RNNModelWithTorch(nn.Module):
-    def __init__(self, rnn_layer, vocab_size, **kwargs):
-        super(RNNModelWithTorch, self).__init__(**kwargs)
-        self.rnn = rnn_layer
-        self.vocab_size = vocab_size
-        self.num_hiddens = self.rnn.hidden_size
-
-        # If RNN is bidirectional, num_directions should be 2, else it should be 1
-        if not self.rnn.bidirectional:
-            self.num_directions = 1
-            self.linear = nn.Linear(self.num_hiddens, vocab_size)
-        else:
-            self.num_directions = 2
-            self.linear = nn.Linear(self.num_hiddens * 2, vocab_size)
-
-    def forward(self, inputs, state):
-        x = F.one_hot(inputs.T.long(), self.vocab_size).type(torch.float32)
-        y, state = self.rnn(x, state)
-
-        # The shape of `y` is (num_steps, batch_size, num_hiddens).
-        # Here we only use the output of the last time step
-        output = self.linear(y.reshape(-1, y.shape[-1]))
-        return output, state
-
-    def begin_state(self, device, batch_size=1):
-        if not isinstance(self.rnn, nn.LSTM):
-            # `nn.GRU` takes a tensor as hidden state
-            return torch.zeros(
-                (self.num_directions * self.rnn.num_layers, batch_size, self.num_hiddens),
-                device=device)
-        else:
-            # `nn.LSTM` takes a tuple of hidden states
-            return (torch.zeros((
-                self.num_directions * self.rnn.num_layers,
-                batch_size, self.num_hiddens), device=device),
-                    torch.zeros((
-                        self.num_directions * self.rnn.num_layers,
-                        batch_size, self.num_hiddens), device=device))
 
 
 class RNNTorchAPITest(unittest.TestCase):
