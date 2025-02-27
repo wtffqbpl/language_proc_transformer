@@ -224,6 +224,28 @@ class IntegrationTest(unittest.TestCase):
 
         self.assertTrue(True)
 
+    def test_bidirectional_RNN_model(self):
+        batch_size, num_steps = 32, 35
+        device = dlf.devices()[0]
+
+        train_iter, vocab = load_data_time_machine(batch_size, num_steps)
+
+        vocab_size, num_hiddens, num_layers = len(vocab), 256, 2
+        num_inputs = vocab_size
+        # Set `bidirectional=True` to enable bidirectional-LSTM RNN model.
+        lstm_layer = nn.LSTM(num_inputs, num_hiddens, num_layers, bidirectional=True)
+        model = RNNModelWithTorch(lstm_layer, vocab_size).to(device)
+
+        loss_fn = torch.nn.CrossEntropyLoss()
+
+        # Training
+        num_epochs, learning_rate = 500, 1
+        # FIXME: This is not the correct way to use bidirectional RNN model.
+        train(model, train_iter, vocab, loss_fn, learning_rate, num_epochs, device)
+
+        # To avoid warnings
+        self.assertTrue(True)
+
     def test_predict_sin_function(self):
         seed = 42
         torch.manual_seed(seed)
@@ -242,8 +264,10 @@ class IntegrationTest(unittest.TestCase):
         data = generate_data()
         x, y = create_dataset(data, seq_length)
 
-        x = torch.from_numpy(x).to(dtype=torch.float32).to(device=device).unsqueeze(-1)  # shape: (num_samples, seq_length, 1)
-        y = torch.from_numpy(y).to(dtype=torch.float32).to(device=device).unsqueeze(-1)  # shape: (num_samples, 1)
+        # x.shape: (num_samples, seq_length, 1)
+        x = torch.from_numpy(x).to(dtype=torch.float32).to(device=device).unsqueeze(-1)
+        # y.shape: (num_samples, 1)
+        y = torch.from_numpy(y).to(dtype=torch.float32).to(device=device).unsqueeze(-1)
 
         model = LSTMModel(input_size, hidden_size, num_layers).to(device=device)
         loss_fn = nn.MSELoss()
@@ -308,6 +332,9 @@ class IntegrationTest(unittest.TestCase):
 
                 if i % 100 == 0:
                     print(f'Epoch {epoch + 1}, Iteration {i}, Loss: {loss.item()}')
+
+        # To avoid warnings
+        self.assertTrue(True)
 
 
 if __name__ == '__main__':
