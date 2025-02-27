@@ -3,6 +3,7 @@
 import hashlib
 import os
 import torch
+import torch.utils.data as data
 import tarfile
 import zipfile
 import requests
@@ -107,3 +108,7 @@ def sgd(params, lr, batch_size):
         for param in params:
             param -= lr * param.grad / batch_size
             param.grad.zero_()
+
+def load_array(data_arrays, batch_size, is_train=True):
+    dataset = data.TensorDataset(*data_arrays)
+    return data.DataLoader(dataset, batch_size, shuffle=is_train)
