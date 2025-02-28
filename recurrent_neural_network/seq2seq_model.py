@@ -85,19 +85,22 @@ class Seq2Seq(nn.Module):
 
         # The encoder hidden state is the initial hidden state of the decoder
         hidden, cell = self.encoder(src)
+        # During the training, the decoder would use the target sequence as the input, so
+        # the first input to the decoder is the <sos> token, and the output of the encoder
+        # should be discarded. In the previous code, the encoder output is not returned and used.
 
         # The first input to the decoder is the <sos> token
-        input = target[0, :]  # [batch_size]
+        input_seq = target[0, :]  # [batch_size]
 
         for t in range(1, target_len):
             # The decoder takes the input, the hidden state, and the cell state
-            output, hidden, cell = self.decoder(input, hidden, cell)
+            output, hidden, cell = self.decoder(input_seq, hidden, cell)
             outputs[t] = output
 
             # Decide whether the output should be used as the next input
             teacher_force = torch.rand(1).item() < teacher_forcing_ratio
             top1 = output.argmax(1)  # The max probability of the prediction
-            input = target[t] if teacher_force else top1
+            input_seq = target[t] if teacher_force else top1
 
         return outputs
 
@@ -143,6 +146,7 @@ def inference(model, src, max_len=10, sos_idx=0, eos_idx=2):
 
     with torch.no_grad():
         hidden, cell = model.encoder(src)
+    # The sos_idx is the <sos> token, and also the first meaningful input to the decoder.
     input_token = torch.tensor([sos_idx], device=src.device)  # The initial input is the <sos> token
     # add the <sos> token
     outputs = [torch.tensor([sos_idx]).to(src.device)]
@@ -197,6 +201,8 @@ class Seq2SeqTest(unittest.TestCase):
         model = Seq2Seq(encoder, decoder, device).to(device)
         optimizer = torch.optim.Adam(model.parameters())
         loss_fn = nn.CrossEntropyLoss()
+
+        print(model)
 
         # The toy dataset
         # The sequence format: [<sos>, token1, token2, token3, <eos>]

@@ -125,6 +125,79 @@ class EncoderDecoder(nn.Module):
         return self.decoder(dec_x, dec_state)
 
 
+class Seq2SeqEncoder(Encoder):
+    """ The encoder for the sequence-to-sequence model"""
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
+                 dropout=0, **kwargs):
+        super(Seq2SeqEncoder, self).__init__(**kwargs)
+
+        # Embedding layer
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.GRU(embed_size, num_hiddens, num_layers, dropout=dropout)
+
+    def forward(self, x, *args):
+        # The output x.shape = [batch_size, num_steps, embed_size]
+        x = self.embedding(x)
+        # In RNN model, the first dim should be the time step
+        x = x.permute(1, 0, 2)
+        output, state = self.rnn(x)
+        # The output.shape = [num_steps, batch_size, num_hiddens]
+        # The state[0].shape = [num_layers, batch_size, num_hiddens]
+        return output, state
+
+
+class Seq2SeqDecoder(Decoder):
+    """ The decoder for the sequence-to-sequence model"""
+    def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
+                 dropout=0, **kwargs):
+        super(Seq2SeqDecoder, self).__init__(**kwargs)
+        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.rnn = nn.GRU(embed_size + num_hiddens, num_hiddens, num_layers, dropout=dropout)
+        self.dense = nn.Linear(num_hiddens, vocab_size)
+
+    def init_state(self, enc_all_outputs, *args):
+        return enc_all_outputs
+
+    def forward(self, x, state):
+        # The input x.shape = [batch_size, num_steps]
+        # The output x.shape = [num_steps, batch_size, embed_size]
+        embs = self.embedding(x.t().to(torch.int32))
+        enc_output, hidden_state = state
+        # context.shape = [batch_size, num_hiddens]
+        context = enc_output[-1]
+        # Broadcast context to [num_steps, batch_size, embed_size]
+        context = context.repeat(embs.shape[0], 1, 1)
+        # Concat at the feature dimension
+        embs_and_context = torch.cat((embs, context), -1)
+        outputs, hidden_state = self.rnn(embs_and_context, hidden_state)
+        outputs = self.dense(outputs).swapaxes(0, 1)
+        # outputs.shape = [batch_size, num_steps, vocab_size]
+        # hidden_sate.shape = [num_layers, batch_size, num_hiddens]
+        return outputs, [enc_output, hidden_state]
+
+
+def sequence_mask(x, valid_len, value=0):
+    max_len = x.size(1)
+    mask = torch.arange(max_len, dtype=torch.float32, device=x.device)
+    mask = mask[None, :] < valid_len[:, None]
+    x[~mask] = value
+    return x
+
+
+class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
+    """ Cross entropy with mask and softmax"""
+    # The pred.shape = [batch_size, num_steps, vocab_size]
+    # the label.shape = [batch_size, num_steps]
+    # valid_len.shape = [batch_size]
+    def forward(self, pred: torch.Tensor, label: torch.Tensor, valid_len) -> torch.Tensor:
+        weights = torch.ones_like(label)
+        weights = sequence_mask(weights, valid_len)
+        self.reduction = 'none'
+        unweighted_loss = super().forward(pred.permute(0, 2, 1), label)
+        weighted_loss = (unweighted_loss * weights).mean(dim=1)
+        return weighted_loss
+
+
 class IntegrationTest(unittest.TestCase):
     def test_read_data(self):
         raw_text = read_data_nmt()
@@ -152,6 +225,56 @@ class IntegrationTest(unittest.TestCase):
             print('x:', x, '\nvalid lengths for x:', x_valid_len)
             print('y:', y, '\nvalid lengths for y:', y_valid_len)
             break
+
+    def test_encoder(self):
+        vocab_size, embed_size, num_hiddens, num_layers = 10, 8, 16, 2
+        encoder = Seq2SeqEncoder(vocab_size=vocab_size,
+                                 embed_size=embed_size,
+                                 num_hiddens=num_hiddens,
+                                 num_layers=num_layers)
+        encoder.eval()
+        batch_size = 4
+        x = torch.zeros(size=(4, 7), dtype=torch.long)
+        output, state = encoder(x)
+
+        self.assertEqual(torch.Size([7, batch_size, num_hiddens]), output.shape)
+        self.assertEqual(torch.Size([num_layers, batch_size, num_hiddens]), state.shape)
+
+    def test_decoder(self):
+        vocab_size, embed_size, num_hiddens, num_layers = 10, 8, 16, 2
+        encoder = Seq2SeqEncoder(vocab_size, embed_size, num_hiddens, num_layers)
+        decoder = Seq2SeqDecoder(vocab_size, embed_size, num_hiddens, num_layers)
+
+        batch_size, num_steps = 4, 7
+        x = torch.zeros(size=(batch_size, num_steps), dtype=torch.long)
+        state = decoder.init_state(encoder(x))
+        dec_outputs, state = decoder(x, state)
+
+        self.assertEqual(torch.Size([batch_size, num_steps, vocab_size]), dec_outputs.shape)
+        self.assertEqual(torch.Size([num_steps, batch_size, num_hiddens]), state[0].shape)
+        self.assertEqual(torch.Size([num_layers, batch_size, num_hiddens]), state[1].shape)
+
+    def test_sequence_mask(self):
+        x = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        indices = torch.tensor([1, 2])
+
+        x = sequence_mask(x, indices)
+
+        x_target = torch.tensor([[1, 0, 0], [4, 5, 0]])
+        self.assertTrue(torch.equal(x_target, x))
+
+        x = torch.ones(size=(2, 3, 4))
+        x_out = sequence_mask(x, indices, value=-1)
+
+    def test_cross_entropy_with_mask(self):
+        loss = MaskedSoftmaxCELoss()
+        ret = loss(
+            torch.ones(3, 4, 10),
+            torch.ones((3, 4), dtype=torch.long),
+            torch.tensor([4, 2, 0])
+        )
+        print(ret)
+        self.assertTrue(True)
 
 
 if __name__ == "__main__":
