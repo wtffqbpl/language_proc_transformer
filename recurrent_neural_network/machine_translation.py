@@ -2,6 +2,8 @@
 
 import unittest
 import os
+import math
+import collections
 import torch
 import torch.nn as nn
 from pprint import pprint
@@ -10,7 +12,9 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import utils.dlf as dlf
-from recurrent_neural_network.rnn_utils import Vocab
+from utils.timer import Timer
+from utils.accumulator import Accumulator
+from recurrent_neural_network.rnn_utils import Vocab, grad_clipping
 
 
 dlf.DATA_HUB['fra-eng'] = (dlf.DATA_URL + 'fra-eng.zip', '94646ad1522d915e7b0f9296181140edcf86a4f5')
@@ -128,7 +132,7 @@ class EncoderDecoder(nn.Module):
 class Seq2SeqEncoder(Encoder):
     """ The encoder for the sequence-to-sequence model"""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
-                 dropout=0, **kwargs):
+                 dropout: float = 0, **kwargs):
         super(Seq2SeqEncoder, self).__init__(**kwargs)
 
         # Embedding layer
@@ -149,7 +153,7 @@ class Seq2SeqEncoder(Encoder):
 class Seq2SeqDecoder(Decoder):
     """ The decoder for the sequence-to-sequence model"""
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers,
-                 dropout=0, **kwargs):
+                 dropout: float = 0, **kwargs):
         super(Seq2SeqDecoder, self).__init__(**kwargs)
         self.embedding = nn.Embedding(vocab_size, embed_size)
         self.rnn = nn.GRU(embed_size + num_hiddens, num_hiddens, num_layers, dropout=dropout)
@@ -196,6 +200,93 @@ class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
         unweighted_loss = super().forward(pred.permute(0, 2, 1), label)
         weighted_loss = (unweighted_loss * weights).mean(dim=1)
         return weighted_loss
+
+
+def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
+    def xavier_init_weights(m):
+        if type(m) == nn.Linear:
+            nn.init.xavier_uniform_(m.weight)
+        if type(m) == nn.GRU:
+            for param in m._flat_weights_names:
+                if 'weight' in param:
+                    nn.init.xavier_uniform_(m._parameters[param])
+
+    net.apply(xavier_init_weights)
+    net.to(device)
+
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    loss = MaskedSoftmaxCELoss()
+    net.train()
+
+    metric = Accumulator(2)
+    timer = Timer()
+    for epoch in range(num_epochs):
+        for batch in data_iter:
+            optimizer.zero_grad()
+            x, x_valid_len, y, y_valid_len = [x.to(device) for x in batch]
+            bos = torch.tensor([tgt_vocab['<bos>']] * y.shape[0], device=device).reshape(-1, 1)
+            dec_input = torch.cat([bos, y[:, :-1]], 1)  # Forcing learning
+            y_hat, _ = net(x, dec_input, x_valid_len)
+            l = loss(y_hat, y, y_valid_len)
+            l.sum().backward()
+            grad_clipping(net, 1)
+            num_tokens = y_valid_len.sum()
+            optimizer.step()
+
+            with torch.no_grad():
+                metric.add(l.sum(), num_tokens)
+        if (epoch + 1) % 10 == 0:
+            print(f'Epoch {epoch+1}, loss {metric[0]/metric[1]:.4f}')
+    print(f'loss {metric[0] / metric[1]:.4f}, {metric[1] / timer.stop():.1f} ',
+          f'tokens/sec on {str(device)}')
+
+
+def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
+                    device, save_attention_weights=False):
+    """ The prediction of a sequence of sequences"""
+    # Set the net to evaluation mode
+    net.eval()
+    src_tokens = src_vocab[src_sentence.lower().split(' ')] + [src_vocab['<eos>']]
+    enc_valid_len = torch.tensor([len(src_tokens)], device=device)
+    src_tokens = truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
+    # Add batch_size dimension
+    enc_x = torch.unsqueeze(torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
+    enc_outputs = net.encoder(enc_x, enc_valid_len)
+    dec_state = net.decoder.init_state(enc_outputs, enc_valid_len)
+    # Add batch_size dimension
+    dec_x = torch.unsqueeze(torch.tensor([tgt_vocab['<bos>']], dtype=torch.long, device=device), dim=0)
+    output_seq, attention_weight_seq = [], []
+    for _ in range(num_steps):
+        y, dec_state = net.decoder(dec_x, dec_state)
+        # We use the max possible vocab as the next step input for the decoder
+        dec_x = y.argmax(dim=2)
+        pred = dec_x.squeeze(dim=0).type(torch.int32).item()
+        # Save the attention
+        if save_attention_weights:
+            attention_weight_seq.append(net.decoder.attention_weights)
+        # Once the `<eos>` tag has been predicted, the output sequence should be stopped.
+        if pred == tgt_vocab['<eos>']:
+            break
+        output_seq.append(pred)
+
+    return ' '.join(tgt_vocab.to_tokens(output_seq)), attention_weight_seq
+
+
+def bleu(pred_seq, label_seq, k):
+    """ Compute the BLEU """
+    pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
+    len_pred, len_label = len(pred_tokens), len(label_tokens)
+    score = math.exp(min(0, int(1 - len_label / len_pred)))
+    for n in range(1, k + 1):
+        num_matches, label_subs = 0, collections.defaultdict(int)
+        for i in range(len_label - n + 1):
+            label_subs[' '.join(label_tokens[i: i + n])] += 1
+        for i in range(len_pred - n + 1):
+            if label_subs[' '.join(pred_tokens[i: i + n])] > 0:
+                num_matches += 1
+                label_subs[' '.join(pred_tokens[i: i + n])] -= 1
+        score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
+    return score
 
 
 class IntegrationTest(unittest.TestCase):
@@ -275,6 +366,28 @@ class IntegrationTest(unittest.TestCase):
         )
         print(ret)
         self.assertTrue(True)
+
+    def test_training(self):
+        embed_size, num_hiddens, num_layers, dropout = 32, 32, 2, 0.1
+        batch_size, num_steps = 64, 10
+        lr, num_epochs = 0.005, 300
+        device = dlf.devices()[0]
+
+        train_iter, src_vocab, tgt_vocab = load_data_nmt(batch_size, num_steps)
+        encoder = Seq2SeqEncoder(len(src_vocab), embed_size, num_hiddens, num_layers, dropout)
+        decoder = Seq2SeqDecoder(len(tgt_vocab), embed_size, num_hiddens, num_layers, dropout)
+        net = EncoderDecoder(encoder, decoder)
+
+        train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device)
+
+        engs = ['go .', "i lost .", "he\'s calm .", "i\'m home ."]
+        fras = ['va !', 'j\'ai perdu .', 'il est calme .', 'je suis chez moi .']
+
+        for eng, fra in zip(engs, fras):
+            translation, attention_weight_seq = predict_seq2seq(
+                net, eng, src_vocab, tgt_vocab, num_steps, device)
+            print(f'{eng} => {translation}, ',
+                  f'bleu {bleu(translation, fra, k=2):.3f}')
 
 
 if __name__ == "__main__":
