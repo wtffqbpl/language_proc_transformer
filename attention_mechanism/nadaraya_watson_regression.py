@@ -14,14 +14,15 @@ class NWKernelRegression(nn.Module):
     def __init__(self, **kwargs):
         super(NWKernelRegression, self).__init__(**kwargs)
         self.w = nn.Parameter(torch.rand(size=(1,), requires_grad=True))
+        self.attention_weights = None
 
     def forward(self, queries: torch.Tensor, keys: torch.Tensor, values: torch.Tensor):
         # The shape of the queries and attention_weights is (num_queries, num_key_values_pairs)
         queries = queries.repeat_interleave(keys.shape[1]).reshape((-1, keys.shape[1]))
-        attention_weights = nn.functional.softmax(-((queries - keys) * self.w)**2 / 2, dim=1)
+        self.attention_weights = nn.functional.softmax(-((queries - keys) * self.w)**2 / 2, dim=1)
 
         # The shape of the value is (num_queries, num_key_values_pairs)
-        return torch.bmm(attention_weights.unsqueeze(1), values.unsqueeze(-1)).reshape(-1)
+        return torch.bmm(self.attention_weights.unsqueeze(1), values.unsqueeze(-1)).reshape(-1)
 
 
 class IntegrationTest(unittest.TestCase):
@@ -120,6 +121,11 @@ class IntegrationTest(unittest.TestCase):
             plt.plot(x_train, y_train, 'o', alpha=0.5)
 
         plot_kernel_reg(y_hat)
+        plt.show()
+
+        show_heatmaps(net.attention_weights.unsqueeze(0).unsqueeze(0),
+                      xlabel='Sorted training inputs',
+                      ylabel='Sorted testing inputs')
         plt.show()
 
         self.assertTrue(True)
