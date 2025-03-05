@@ -89,6 +89,29 @@ class DotProductAttention(nn.Module):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
 
+# TODO:General Attention 的核心思想是先对 key 做一个线性变换，再与 query 直接做点积计算得分，其公式为：
+# score = Q^T * W * K
+class GeneralAttention(nn.Module):
+    def __init__(self, num_queries, num_keys, **kwargs):
+        super(GeneralAttention, self).__init__(**kwargs)
+
+        self.w = nn.Linear(num_keys, num_queries, bias=False)
+
+    def forward(self, queries: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, mask=None):
+        if queries.dim() == 2:
+            queries = queries.unsqueeze(1)  # (batch_size, 1, num_queries)
+
+        transformed_keys = self.w(keys)  # (batch_size, seq_len, num_queries)
+        # compute scores
+        scores = torch.bmm(queries, transformed_keys.transpose(1, 2)).squeeze(1)  # (batch_size, seq_len)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, value=-1e9)
+        attn_weights = torch.nn.functional.softmax(scores, dim=-1)
+        context = torch.bmm(attn_weights.unsqueeze(1), values).unsqueeze(1)
+        return context, attn_weights
+
+
 class IntegrationTest(unittest.TestCase):
     def test_masked_softmax(self):
         res = masked_softmax(torch.rand(2, 2, 4), torch.tensor([2, 3]))
@@ -130,6 +153,26 @@ class IntegrationTest(unittest.TestCase):
                       xlabel='Keys', ylabel='Queries', figsize=(4, 4))
         plt.show()
 
+        self.assertTrue(True)
+
+    def test_general_attention_scores(self):
+        batch_size, seq_len = 2, 5
+        query_dim, key_dim, value_dim = 16, 20, 32
+
+        queries = torch.rand(batch_size, query_dim)
+        keys = torch.rand(batch_size, seq_len, key_dim)
+        values = torch.rand(batch_size, seq_len, value_dim)
+
+        general_attention = GeneralAttention(query_dim, key_dim)
+        context, attn_weights = general_attention(queries, keys, values)
+
+        print('General attention context shape: ', context.shape)
+        print('Attention weights shape: ', attn_weights.shape)
+
+        show_heatmaps(context.reshape((1, 1, batch_size, value_dim)),
+                      xlabel='Keys', ylabel='Queries', figsize=(4, 4))
+        plt.show()
+        
         self.assertTrue(True)
 
 
