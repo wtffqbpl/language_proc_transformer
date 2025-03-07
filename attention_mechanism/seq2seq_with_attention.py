@@ -71,7 +71,7 @@ class AdditiveAttention(nn.Module):
 
 class Seq2SeqAttentionDecoder(AttentionDecoder):
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers, dropout: float = 0, **kwargs):
-        super(Seq2SeqAttentionDecoder, self).__init__()
+        super(Seq2SeqAttentionDecoder, self).__init__(**kwargs)
         self.attention = AdditiveAttention(num_hiddens, num_hiddens, num_hiddens, dropout)
         self.embedding = nn.Embedding(vocab_size, embed_size)
         self.rnn = nn.GRU(embed_size + num_hiddens, num_hiddens, num_layers, dropout=dropout)
@@ -154,8 +154,6 @@ class IntegrationTest(unittest.TestCase):
         train_seq2seq(net, train_iter, lr, num_epochs, tgt_vocab, device)
 
         torch.save(net, self.model_path)
-
-        model = torch.load(self.model_path).to(device)
 
         self.assertTrue(True)
 

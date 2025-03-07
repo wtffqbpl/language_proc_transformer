@@ -10,5 +10,6 @@ datasets~=3.1.0
 pillow~=9.5.0
 torchsummary>=1.5.1
 torchinfo>=1.5.2
+torchdata==0.9.0
 opencv-contrib-python
 pytest~=8.3.4
