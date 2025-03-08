@@ -69,6 +69,80 @@ class AdditiveAttention(nn.Module):
         return torch.bmm(self.dropout(self.attention_weights), values)
 
 
+class DotProductAttention(nn.Module):
+    def __init__(self, dropout, **kwargs):
+        super(DotProductAttention, self).__init__(**kwargs)
+        self.dropout = nn.Dropout(dropout)
+        self.attention_weights = None
+
+    def forward(self,
+                queries: torch.Tensor,
+                keys: torch.Tensor,
+                values: torch.Tensor,
+                valid_lens: torch.Tensor = None):
+        # queries.shape: (batch_size, num_queries, d)
+        # keys.shape: (batch_size, num_key_value_pairs, d)
+        # values.shape: (batch_size, num_key_value_pairs, value_dimension)
+        # valid_lens.shape: (batch_size, ) or (batch_size, num_queries)
+        d = queries.shape[-1]
+        # Swap the last two dimensions of keys with keys.transpose(1, 2)
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / math.sqrt(d)
+        self.attention_weights = masked_softmax(scores, valid_lens)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+
+def transpose_qkv(x, num_heads):
+    # x.shape: (batch_size, num_key_value_pairs, num_hiddens)
+    # The output shape: (batch_size, num_key_value_pairs, num_heads, num_hiddens / num_heads)
+    x = x.reshape(x.shape[0], x.shape[1], num_heads, -1)
+
+    # The output x.shape: (batch_size, num_heads, num_key_value_pairs, num_hiddens / num_heads)
+    x = x.permute(0, 2, 1, 3)
+
+    # The final output shape: (batch_size * num_heads, num_key_value_pairs, num_hiddens / num_heads)
+    return x.reshape(-1, x.shape[2], x.shape[3])
+
+
+def transpose_output(x, num_heads):
+    # Reverse the transpose_qkv operations
+    x = x.reshape(-1, num_heads, x.shape[1], x.shape[2])
+    x = x.permute(0, 2, 1, 3)
+    return x.reshape(x.shape[0], x.shape[1], -1)
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, key_size, query_size, value_size, num_hiddens, num_heads, dropout, bias=False, **kwargs):
+        super(MultiHeadAttention, self).__init__(**kwargs)
+
+        self.num_heads = num_heads
+        self.attention = DotProductAttention(dropout)
+
+        self.w_q = nn.Linear(query_size, num_hiddens, bias=bias)
+        self.w_k = nn.Linear(key_size, num_hiddens, bias=bias)
+        self.w_v = nn.Linear(value_size, num_hiddens, bias=bias)
+        self.w_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
+
+    def forward(self, queries, keys, values, valid_lens):
+        # The shapes of the queries, keys, values are (batch_size, num_key_query_pairs, num_hiddens)
+        # The shape of the valid_lens: (batch_size, ) or (batch_size, num_queries)
+        # The shape of the queries, keys, values after transformation:
+        # (batch_size * num_heads, num_key_query_pairs, num_hiddens / num_heads)
+        queries = transpose_qkv(self.w_q(queries), self.num_heads)
+        keys = transpose_qkv(self.w_k(keys), self.num_heads)
+        values = transpose_qkv(self.w_v(values), self.num_heads)
+
+        if valid_lens is not None:
+            # Repeat the first
+            valid_lens = torch.repeat_interleave(valid_lens, repeats=self.num_heads, dim=0)
+
+        # output.shape: (batch_size * num_heads, num_queries, num_hiddens / num_heads)
+        output = self.attention(queries, keys, values, valid_lens)
+
+        # output_concat.shape: (batch_size, num_queries, num_hiddens)
+        output_concat = transpose_output(output, self.num_heads)
+        return self.w_o(output_concat)
+
+
 class Seq2SeqAttentionDecoder(AttentionDecoder):
     def __init__(self, vocab_size, embed_size, num_hiddens, num_layers, dropout: float = 0, **kwargs):
         super(Seq2SeqAttentionDecoder, self).__init__(**kwargs)
@@ -184,6 +258,18 @@ class IntegrationTest(unittest.TestCase):
         show_heatmaps(attention_weights[:, :, :, :len(engs[-1].split()) + 1].cpu(),
                       xlabel='Key positions', ylabel='Query positions')
         plt.show()
+
+    def test_multi_head_attention(self):
+        num_hiddens, num_heads = 100, 5
+
+        attention = MultiHeadAttention(num_hiddens, num_hiddens, num_hiddens,
+                                       num_hiddens, num_heads, 0.5)
+        attention.eval()
+
+        print(attention)
+
+        self.assertTrue(True)
+
 
 
 if __name__ == "__main__":
