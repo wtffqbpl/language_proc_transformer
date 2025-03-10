@@ -9,107 +9,11 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.plot import show_heatmaps
-
-
-def sequence_mask(x, valid_len, value: float = 0):
-    max_len = x.size(1)
-    mask = torch.arange(max_len, dtype=torch.float32,
-                        device=x.device)[None, :] < valid_len[:, None]
-    x[~mask] = value
-    return x
-
-
-def masked_softmax(x: torch.Tensor, valid_lens):
-    """ Mask the last dimension before computing the softmax"""
-    # X is 3D tensor, valid_lens: 1D or 2D tensor
-    if valid_lens is None:
-        return nn.functional.softmax(x, dim=-1)
-    else:
-        shape = x.shape
-        if valid_lens.dim() == 1:
-            valid_lens = torch.repeat_interleave(valid_lens, shape[1])
-        else:
-            valid_lens = valid_lens.reshape(-1)
-        x = sequence_mask(x.reshape(-1, shape[-1]), valid_lens, value=-1e6)
-
-        return nn.functional.softmax(x.reshape(shape), dim=-1)
-
-
-class AdditiveAttention(nn.Module):
-    def __init__(self, key_size, query_size, num_hiddens, dropout, **kwargs):
-        super(AdditiveAttention, self).__init__(**kwargs)
-        self.w_k = nn.Linear(key_size, num_hiddens, bias=False)
-        self.w_q = nn.Linear(query_size, num_hiddens, bias=False)
-        self.w_v = nn.Linear(num_hiddens, 1, bias=False)
-        self.dropout = nn.Dropout(dropout)
-        self.attention_weights = None
-
-    def forward(self,
-                queries: torch.Tensor,
-                keys: torch.Tensor,
-                values: torch.Tensor,
-                valid_lens: torch.Tensor):
-        queries, keys = self.w_q(queries), self.w_k(keys)
-
-        # expand dimensions. The tensors' shapes after expansion are:
-        # queries.shape = (batch_size, num_queries, 1, num_hiddens)
-        # key.shape = (batch_size, 1, num_key_value_pairs, num_hiddens)
-        # Using broadcasting mechanism to elementwise-addition.
-        features = queries.unsqueeze(2) + keys.unsqueeze(1)
-        features = torch.tanh(features)
-
-        # There is only one output of the self.w_v, so remove the last dim
-        # scores.shape = (batch_size, num_queries, num_key_value_pairs)
-        scores = self.w_v(features).squeeze(-1)
-        self.attention_weights = masked_softmax(scores, valid_lens)
-
-        # The values.shape = (batch_size, num_key_value_pairs,
-        return torch.bmm(self.dropout(self.attention_weights), values)
-
-
-class DotProductAttention(nn.Module):
-    def __init__(self, dropout, **kwargs):
-        super(DotProductAttention, self).__init__(**kwargs)
-        self.dropout = nn.Dropout(dropout)
-        self.attention_weights = None
-
-    def forward(self,
-                queries: torch.Tensor,
-                keys: torch.Tensor,
-                values: torch.Tensor,
-                valid_lens: torch.Tensor = None):
-        # queries.shape: (batch_size, num_queries, d)
-        # keys.shape: (batch_size, num_key_value_pairs, d)
-        # values.shape: (batch_size, num_key_value_pairs, value_dimension)
-        # valid_lens.shape: (batch_size, ) or (batch_size, num_queries)
-        d = queries.shape[-1]
-        # Swap the last two dimensions of keys with keys.transpose(1, 2)
-        scores = torch.bmm(queries, keys.transpose(1, 2)) / math.sqrt(d)
-        self.attention_weights = masked_softmax(scores, valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values)
-
-
-# TODO:General Attention 的核心思想是先对 key 做一个线性变换，再与 query 直接做点积计算得分，其公式为：
-# score = Q^T * W * K
-class GeneralAttention(nn.Module):
-    def __init__(self, num_queries, num_keys, **kwargs):
-        super(GeneralAttention, self).__init__(**kwargs)
-
-        self.w = nn.Linear(num_keys, num_queries, bias=False)
-
-    def forward(self, queries: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, mask=None):
-        if queries.dim() == 2:
-            queries = queries.unsqueeze(1)  # (batch_size, 1, num_queries)
-
-        transformed_keys = self.w(keys)  # (batch_size, seq_len, num_queries)
-        # compute scores
-        scores = torch.bmm(queries, transformed_keys.transpose(1, 2)).squeeze(1)  # (batch_size, seq_len)
-
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, value=-1e9)
-        attn_weights = torch.nn.functional.softmax(scores, dim=-1)
-        context = torch.bmm(attn_weights.unsqueeze(1), values).unsqueeze(1)
-        return context, attn_weights
+from attention_mechanism.attention_utils import (
+    masked_softmax,
+    DotProductAttention,
+    AdditiveAttention,
+    GeneralAttention)
 
 
 class IntegrationTest(unittest.TestCase):

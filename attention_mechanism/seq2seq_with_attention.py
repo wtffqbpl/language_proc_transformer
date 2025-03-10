@@ -11,6 +11,14 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import utils.dlf as dlf
 from utils.plot import show_heatmaps
+from attention_mechanism.attention_utils import (
+    masked_softmax,
+    transpose_qkv,
+    transpose_output,
+    DotProductAttention,
+    AdditiveAttention,
+    MultiHeadAttention)
+
 from recurrent_neural_network.rnn_utils import (
     Decoder, EncoderDecoder, Seq2SeqEncoder,
     load_data_nmt, train_seq2seq, predict_seq2seq, bleu)
@@ -18,129 +26,11 @@ from recurrent_neural_network.rnn_utils import (
 
 class AttentionDecoder(Decoder, ABC):
     def __init__(self, **kwargs):
-        super( AttentionDecoder, self).__init__(**kwargs)
+        super(AttentionDecoder, self).__init__(**kwargs)
 
     @property
     def attention_weights(self):
         raise NotImplementedError
-
-
-def sequence_mask(x: torch.Tensor, valid_len: torch.Tensor, value: float = 0):
-    max_len = x.size(1)
-    mask = torch.arange(max_len, dtype=torch.float32, device=x.device)[None, :] < valid_len[:, None]
-    x[~mask] = value
-    return x
-
-
-def masked_softmax(x: torch.Tensor, valid_lens):
-    if valid_lens is None:
-        return nn.functional.softmax(x, dim=-1)
-    else:
-        shape = x.shape
-        if valid_lens.dim() == 1:
-            valid_lens = torch.repeat_interleave(valid_lens, shape[1])
-        else:
-            valid_lens = valid_lens.reshape(-1)
-        x = sequence_mask(x.reshape(-1, shape[-1]), valid_lens, value=-1e6)
-        return nn.functional.softmax(x.reshape(shape), dim=-1)
-
-
-class AdditiveAttention(nn.Module):
-    def __init__(self, key_size, query_size, num_hiddens, dropout, **kwargs):
-        super(AdditiveAttention, self).__init__(**kwargs)
-        self.w_k = nn.Linear(key_size, num_hiddens, bias=False)
-        self.w_q = nn.Linear(query_size, num_hiddens, bias=False)
-        self.w_v = nn.Linear(num_hiddens, 1, bias=False)
-        self.dropout = nn.Dropout(dropout)
-        self.attention_weights = None
-
-    def forward(self,
-                queries: torch.Tensor,
-                keys: torch.Tensor,
-                values: torch.Tensor,
-                valid_lens: torch.Tensor):
-        queries, keys = self.w_q(queries), self.w_k(keys)
-        features = queries.unsqueeze(2) + keys.unsqueeze(1)
-        features = torch.tanh(features)
-
-        scores = self.w_v(features).squeeze(-1)
-        self.attention_weights = masked_softmax(scores, valid_lens)
-
-        return torch.bmm(self.dropout(self.attention_weights), values)
-
-
-class DotProductAttention(nn.Module):
-    def __init__(self, dropout, **kwargs):
-        super(DotProductAttention, self).__init__(**kwargs)
-        self.dropout = nn.Dropout(dropout)
-        self.attention_weights = None
-
-    def forward(self,
-                queries: torch.Tensor,
-                keys: torch.Tensor,
-                values: torch.Tensor,
-                valid_lens: torch.Tensor = None):
-        # queries.shape: (batch_size, num_queries, d)
-        # keys.shape: (batch_size, num_key_value_pairs, d)
-        # values.shape: (batch_size, num_key_value_pairs, value_dimension)
-        # valid_lens.shape: (batch_size, ) or (batch_size, num_queries)
-        d = queries.shape[-1]
-        # Swap the last two dimensions of keys with keys.transpose(1, 2)
-        scores = torch.bmm(queries, keys.transpose(1, 2)) / math.sqrt(d)
-        self.attention_weights = masked_softmax(scores, valid_lens)
-        return torch.bmm(self.dropout(self.attention_weights), values)
-
-
-def transpose_qkv(x, num_heads):
-    # x.shape: (batch_size, num_key_value_pairs, num_hiddens)
-    # The output shape: (batch_size, num_key_value_pairs, num_heads, num_hiddens / num_heads)
-    x = x.reshape(x.shape[0], x.shape[1], num_heads, -1)
-
-    # The output x.shape: (batch_size, num_heads, num_key_value_pairs, num_hiddens / num_heads)
-    x = x.permute(0, 2, 1, 3)
-
-    # The final output shape: (batch_size * num_heads, num_key_value_pairs, num_hiddens / num_heads)
-    return x.reshape(-1, x.shape[2], x.shape[3])
-
-
-def transpose_output(x, num_heads):
-    # Reverse the transpose_qkv operations
-    x = x.reshape(-1, num_heads, x.shape[1], x.shape[2])
-    x = x.permute(0, 2, 1, 3)
-    return x.reshape(x.shape[0], x.shape[1], -1)
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, key_size, query_size, value_size, num_hiddens, num_heads, dropout, bias=False, **kwargs):
-        super(MultiHeadAttention, self).__init__(**kwargs)
-
-        self.num_heads = num_heads
-        self.attention = DotProductAttention(dropout)
-
-        self.w_q = nn.Linear(query_size, num_hiddens, bias=bias)
-        self.w_k = nn.Linear(key_size, num_hiddens, bias=bias)
-        self.w_v = nn.Linear(value_size, num_hiddens, bias=bias)
-        self.w_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
-
-    def forward(self, queries, keys, values, valid_lens):
-        # The shapes of the queries, keys, values are (batch_size, num_key_query_pairs, num_hiddens)
-        # The shape of the valid_lens: (batch_size, ) or (batch_size, num_queries)
-        # The shape of the queries, keys, values after transformation:
-        # (batch_size * num_heads, num_key_query_pairs, num_hiddens / num_heads)
-        queries = transpose_qkv(self.w_q(queries), self.num_heads)
-        keys = transpose_qkv(self.w_k(keys), self.num_heads)
-        values = transpose_qkv(self.w_v(values), self.num_heads)
-
-        if valid_lens is not None:
-            # Repeat the first
-            valid_lens = torch.repeat_interleave(valid_lens, repeats=self.num_heads, dim=0)
-
-        # output.shape: (batch_size * num_heads, num_queries, num_hiddens / num_heads)
-        output = self.attention(queries, keys, values, valid_lens)
-
-        # output_concat.shape: (batch_size, num_queries, num_hiddens)
-        output_concat = transpose_output(output, self.num_heads)
-        return self.w_o(output_concat)
 
 
 class Seq2SeqAttentionDecoder(AttentionDecoder):
