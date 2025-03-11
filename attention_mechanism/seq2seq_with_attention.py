@@ -12,25 +12,13 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 import utils.dlf as dlf
 from utils.plot import show_heatmaps
 from attention_mechanism.attention_utils import (
-    masked_softmax,
-    transpose_qkv,
-    transpose_output,
-    DotProductAttention,
+    AttentionDecoder,
     AdditiveAttention,
     MultiHeadAttention)
 
 from recurrent_neural_network.rnn_utils import (
     Decoder, EncoderDecoder, Seq2SeqEncoder,
     load_data_nmt, train_seq2seq, predict_seq2seq, bleu)
-
-
-class AttentionDecoder(Decoder, ABC):
-    def __init__(self, **kwargs):
-        super(AttentionDecoder, self).__init__(**kwargs)
-
-    @property
-    def attention_weights(self):
-        raise NotImplementedError
 
 
 class Seq2SeqAttentionDecoder(AttentionDecoder):

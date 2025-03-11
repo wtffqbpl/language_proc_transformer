@@ -1,8 +1,50 @@
 #! coding: utf-8
 
+from abc import ABC
 import torch
 import torch.nn as nn
 import math
+
+
+class Encoder(nn.Module):
+    """ Encoder-Decoder architecture for neural machine translation """
+    def __init__(self, **kwargs):
+        super(Encoder, self).__init__(**kwargs)
+
+    def forward(self, x: torch.Tensor, *args):
+        raise NotImplementedError
+
+
+class Decoder(nn.Module):
+    def __init__(self, **kwargs):
+        super(Decoder, self).__init__(**kwargs)
+
+    def init_state(self, enc_outputs: torch.Tensor, *args):
+        raise NotImplementedError
+
+    def forward(self, x: torch.Tensor, *args):
+        raise NotImplementedError
+
+
+class EncoderDecoder(nn.Module):
+    def __init__(self, encoder: Encoder, decoder: Decoder, **kwargs):
+        super(EncoderDecoder, self).__init__(**kwargs)
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, enc_x: torch.Tensor, dec_x: torch.Tensor, *args):
+        enc_outputs = self.encoder(enc_x, *args)
+        dec_state = self.decoder.init_state(enc_outputs, *args)
+        return self.decoder(dec_x, dec_state)
+
+
+class AttentionDecoder(Decoder, ABC):
+    def __init__(self, **kwargs):
+        super(AttentionDecoder, self).__init__(**kwargs)
+
+    @property
+    def attention_weights(self):
+        raise NotImplementedError
 
 
 def sequence_mask(x: torch.Tensor, valid_len: torch.Tensor, value: float = 0):
@@ -150,3 +192,20 @@ class MultiHeadAttention(nn.Module):
         # output_concat.shape: (batch_size, num_queries, num_hiddens)
         output_concat = transpose_output(output, self.num_heads)
         return self.w_o(output_concat)
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, num_hiddens, dropout, max_len=1000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+
+        # Create a p tensor as long as enough
+        self.p = torch.zeros((1, max_len, num_hiddens))
+        x = torch.arange(max_len, dtype=torch.float32).reshape(-1, 1) / \
+            torch.pow(10000, torch.arange(0, num_hiddens, 2, dtype=torch.float32) / num_hiddens)
+        self.p[:, :, 0::2] = torch.sin(x)
+        self.p[:, :, 1::2] = torch.cos(x)
+
+    def forward(self, x: torch.Tensor):
+        x = x + self.p[:, :x.shape[1], :].to(x.device)
+        return self.dropout(x)
