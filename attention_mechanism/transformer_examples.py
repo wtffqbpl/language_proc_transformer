@@ -248,5 +248,9 @@ class IntegrationTest(unittest.TestCase):
         self.assertTrue(True)
 
 
+# PyTorch Transformer tutorials
+# https://pytorch.org/tutorials/intermediate/transformer_building_blocks.html
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=True)
