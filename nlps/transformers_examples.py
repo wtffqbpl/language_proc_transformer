@@ -30,7 +30,7 @@ class IntegrationTest(unittest.TestCase):
         generator.pad_token = tokenizer.eos_token
         response = "Dear Bumblebee, I am sorry to hear that your order was mixed up."
         prompt = self.text + '\n\nCustomer service response:\n' + response
-        output = generator(prompt, max_length=256, truncation=True, pad_token_id=tokenizer.eos_token_id)
+        output = generator(prompt, max_length=512, truncation=True, pad_token_id=tokenizer.eos_token_id)
         print(output[0]['generated_text'])
 
 
