@@ -21,19 +21,46 @@ np.random.seed(1)
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, e_q: int, e_k: int, e_v: int, e_total: int, num_heads: int, dropout_p: float = 0.0):
+    def __init__(
+            self,
+            e_q: int,
+            e_k: int,
+            e_v: int,
+            e_total: int,
+            num_heads: int,
+            dropout_p: float = 0.0,
+            bias=True,
+            device=None,
+            dtype=None,
+    ):
+        factory_kwargs = {'device': device, 'dtype': dtype}
+
         super(MultiHeadAttention, self).__init__()
         self.num_heads = num_heads
         self.dropout_p = dropout_p
-        self.query_proj = nn.Linear(e_q, e_total)
-        self.key_proj = nn.Linear(e_k, e_total)
-        self.value_proj = nn.Linear(e_v, e_total)
+
+        self._qkv_same_embed_dim = e_q == e_k and e_q == e_v
+
+        if self._qkv_same_embed_dim:
+            self.packed_proj = nn.Linear(e_q, e_total * 3, bias=bias, **factory_kwargs)
+        else:
+            self.query_proj = nn.Linear(e_q, e_total, **factory_kwargs)
+            self.key_proj = nn.Linear(e_k, e_total, **factory_kwargs)
+            self.value_proj = nn.Linear(e_v, e_total, **factory_kwargs)
         e_out = e_q
-        self.out_proj = nn.Linear(e_total, e_out)
+        self.out_proj = nn.Linear(e_total, e_out, **factory_kwargs)
         assert e_total % num_heads == 0, "Embedding dim is not divisible by num_heads"
         self.e_head = e_total // num_heads
+        self.bias = bias
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            attn_mask=None,
+            is_causal=False,
+    ) -> torch.Tensor:
         """
         Forward pass; runs the following process:
             1. Apply input projection
@@ -43,13 +70,32 @@ class MultiHeadAttention(nn.Module):
         :param query: (torch.Tensor) query of shape (N, L_t E_q)
         :param key: (torch.Tensor) key of shape (N, L_s, E_k)
         :param value: (torch.Tensor) value of shape (N, L_s, E_v)
+        :param attn_mask: (torch.Tensor, optional) attention mask of shape (N, L_q, L_kv) to pass to SDPA.
+                            Default is None
+        :param is_causal: (bool, optional) Whether to apply causal mask. Default: False
         :return:
             attn_output (torch.Tensor): output of shape (N, L_t, E_q)
         """
         # Step 1: Apply input projection
-        query = self.query_proj(query)
-        key = self.key_proj(key)
-        value = self.value_proj(value)
+        if self._qkv_same_embed_dim:
+            if query is key and key is value:
+                result = self.packed_proj(query)
+                query, key, value = torch.chunk(result, 3, dim=-1)
+            else:
+                q_weight, k_weight, v_weight = torch.chunk(self.packed_proj.weight, 3, dim=0)
+                if self.bias:
+                    q_bias, k_bias, v_bias = torch.chunk(self.packed_proj.bias, 3, dim=0)
+                else:
+                    q_bias, k_bias, v_bias = None, None, None
+                query, key, value = (
+                    F.linear(query, q_weight, q_bias),
+                    F.linear(key, k_weight, k_bias),
+                    F.linear(value, v_weight, v_bias)
+                )
+        else:
+            query = self.query_proj(query)
+            key = self.key_proj(key)
+            value = self.value_proj(value)
 
         # Step 2: Split heads and prepare for SDPA
         # reshape query, key, value to separate for SDPA
@@ -65,7 +111,7 @@ class MultiHeadAttention(nn.Module):
         # Step 3: Run SDPA
         # (N, num_heads, L_t, E_head)
         attn_output = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=self.dropout_p, is_causal=True if torch.cuda.is_available() else False)
+            query, key, value, dropout_p=self.dropout_p, is_causal=is_causal)
 
         # (N, num_heads, L_t, e_heads) -> (N, L_t, num_heads, E_heads) -> (N, L_t, E_total)
         attn_output = attn_output.transpose(1, 2).flatten(-2)
@@ -90,8 +136,9 @@ def zipf_sentence_lengths(alpha: float, batch_size: int) -> torch.Tensor:
     return torch.tensor(sentence_lengths)
 
 
-# Create nested tensor batch inputs
-def gen_batch(n, e_q, e_k, e_v, device):
+# Generate a batch of semi-realistic data using Zipf distribution for sentence lengths
+# in the form of nested tensors with the jagged layout.
+def gen_batch(n, e_q, e_k, e_v, device, dtype=torch.float32, query_seq_len_1=False):
     # Generate semi-realistic data using Zipf distribution for sentence lengths
     sentence_lengths = zipf_sentence_lengths(alpha=1.2, batch_size=n)
 
@@ -99,9 +146,14 @@ def gen_batch(n, e_q, e_k, e_v, device):
     # dimension and works with torch.compile. The batch items each have shape (B, S*, D)
     # where B = batch size, S* = ragged sequence length, and D = embedding dimension
 
-    query = torch.nested.nested_tensor([
-        torch.randn(l.item(), e_q, device=device)
-        for l in sentence_lengths], layout=torch.jagged)
+    if query_seq_len_1:
+        query = torch.nested.nested_tensor(
+            [torch.randn(1, e_q, dtype=dtype, device=device) for l in sentence_lengths],
+            layout=torch.jagged)
+    else:
+        query = torch.nested.nested_tensor([
+            torch.randn(l.item(), e_q, device=device)
+            for l in sentence_lengths], layout=torch.jagged)
 
     key = torch.nested.nested_tensor([
         torch.randn(s.item(), e_k, device=device)
