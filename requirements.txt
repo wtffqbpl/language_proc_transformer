@@ -1,5 +1,5 @@
-torch~=2.5.1
-torchvision~=0.20.1
+torch~=2.7.0.dev20250311
+torchvision~=0.22.0.dev20250312
 requests>=2.31.0
 numpy~=1.23.5
 matplotlib~=3.10.0
@@ -13,3 +13,5 @@ torchinfo>=1.5.2
 torchdata==0.9.0
 opencv-contrib-python
 pytest~=8.3.4
+bertviz~=1.4.0
+huggingface_hub~=0.24.6
