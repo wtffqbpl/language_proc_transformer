@@ -140,6 +140,21 @@ class Embeddings(nn.Module):
         position_embeddings = self.position_embeddings(position_ids)
         # Combine token and position embeddings
         embeddings = token_embeddings + position_embeddings
+        # Layer normalization here mainly serves to stabilize training and balance numerical
+        # scales. Specifically:
+        #  * Stabilize Training: The token embeddings and positional embeddings are
+        #    learned separately and might end up having different numerical distributions.
+        #    Directly adding them together could lead to significant differences in their
+        #    distributions, which may adversely affect gradient flow and model convergence.
+        #    Layer normalization helps mitigate this internal covariate shift, ensure that the
+        #    data passed to subsequent layers is more stable.
+        #  * Balance Numerical Scales: The normalization operation ensures that all features
+        #    have a consistent scale. This consistency allows the model to better capture and
+        #    integrate information in the following non-linear transformations, ultimately
+        #    enhancing overall performance.
+        # In summary, applying layer normalization to the combined embeddings helps make the
+        # training process smoother, accelerates convergence, and improves the model's
+        # robustness and performance.
         embeddings = self.layer_norm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
