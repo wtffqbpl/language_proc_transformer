@@ -311,6 +311,134 @@ def bert_training(model, optimizer, loss_fn, inputs, labels):
         print('Predictions: ', predictions.tolist())
 
 
+class DistributeMoE(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, dropout, num_experts=4, devices=None):
+        """
+        MoE layer that distributes experts across multiple devices and adds a load balancing loss.
+        """
+        super(DistributeMoE, self).__init__()
+        self.num_experts = num_experts
+        if devices is None:
+            devices = [torch.device('cpu')] * num_experts
+        self.devices = devices
+
+        # Create experts and place each expert on a device (round-robin assignment)
+        self.experts = nn.ModuleList([
+            FeedForward(hidden_size, intermediate_size, dropout).to(self.devices[i % len(self.devices)])
+            for i in range(num_experts)
+        ])
+
+        # Gating networkd (kept on main device) outputs scores for each expert.
+        self.gate = nn.Linear(hidden_size, num_experts)
+
+    def forward(self, x: torch.Tensor):
+        batch_size, seq_length, hidden_size = x.size()
+
+        # Compute gating scores and convert to probability distribution.
+        gate_logits = self.gate(x)  # shape: (batch_size, seq_length, num_experts)
+        gate_probs = F.softmax(gate_logits, dim=-1)
+
+        # Compute load balance loss:
+        importance = gate_probs.sum(dim=(0, 1))  # shape: (num_experts, )
+        mean_importance = importance.mean()
+        std_importance = importance.std()
+        load_balancing_loss = std_importance / (mean_importance + 1e-8)
+
+        # For each expert, move data and model to related devices, and compute output and weighted sum
+        expert_outputs = []
+        for i, expert in enumerate(self.experts):
+            # The i-th expert gate weight. Shape: (batch_size, seq_length, 1)
+            weight = gate_probs[:, :, i].unsqueeze(-1)
+            # Move inputs to the related device
+            x_expert = x.to(self.devices[i % len(self.devices)])
+            expert_out = expert(x_expert)  # shape: (batch_size, seq_length, hidden_size)
+            # Move expert output to the main device (to ensure the following computation on the same device)
+            expert_out = expert_out.to(x.device)
+            expert_outputs.append(weight * expert_out)
+
+        # Weighted sum all expert outputs
+        output = sum(expert_outputs)
+        return output, load_balancing_loss
+
+
+class TransformerBlockDistributedMoE(nn.Module):
+    def __init__(self, hidden_size, num_heads, intermediate_size, dropout, num_experts=4, devices=None):
+        """
+        A single Transformer block that includes a self-attention sub-layer and a MoE layer (replacing the FFN).
+        """
+        super(TransformerBlockDistributedMoE, self).__init__()
+        self.attention = MultiHeadSelfAttention(hidden_size, num_heads, dropout)
+        self.attention_norm = nn.LayerNorm(hidden_size)
+
+        # Distributed MoE
+        self.moe = DistributeMoE(hidden_size, intermediate_size, dropout, num_experts, devices)
+        self.ff_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x: torch.Tensor):
+        # Self-attention sub-layer with residual connections
+        attn_output = self.attention(x)
+        x = self.attention_norm(x + attn_output)
+        # MoE (FFN) sub-layer with residual connection.
+        moe_output, load_loss = self.moe(x)
+        x = self.ff_norm(x + moe_output)
+        return x, load_loss
+
+
+# Mini Transformer Model with MoE Layers
+class MiniTransformerMoE(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_layers, num_heads, intermediate_size,
+                 max_seq_length, dropout, num_experts=4, devices=None):
+        """
+        A small Transformer model with token and positional embeddings.
+        Some Transformer blocks use MoE layers (distributed on different devices).
+        """
+        super(MiniTransformerMoE, self).__init__()
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_seq_length, hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layers = nn.ModuleList([
+            TransformerBlockDistributedMoE(hidden_size, num_heads, intermediate_size, dropout, num_experts, devices)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, input_ids: torch.Tensor):
+        batch_size, seq_length = input_ids.size()
+
+        # Create positional ids.
+        position_ids = torch.arange(seq_length, device=input_ids.device).unsqueeze(0).expand(batch_size, seq_length)
+        x = self.token_embeddings(input_ids) + self.position_embeddings(position_ids)
+        x = self.layer_norm(x)
+        x = self.dropout(x)
+
+        total_load_loss = 0.0
+        for layer in self.layers:
+            x, load_loss = layer(x)
+            total_load_loss += load_loss
+        return x, total_load_loss
+
+
+# Transformer Model for Sequence Classification with MoE
+class TransformerForSeqenceClassificationMoE(nn.Module):
+    def __init__(self, transformer, hidden_size, num_classes, dropout):
+        """
+        Sequence classification model using a Transformer backbone with MoE layers.
+        The [CLS] token representation is used for classification.
+        """
+        super(TransformerForSeqenceClassificationMoE, self).__init__()
+        self.transformer = transformer
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, input_ids: torch.Tensor):
+        transformer_output, load_loss = self.transformer(input_ids)
+        # use the [CLS] token (first token) for classification
+        cls_token = transformer_output[:, 0, :]
+        cls_token = self.dropout(cls_token)
+        logits = self.classifier(cls_token)
+        return logits, load_loss
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         # Hyperparameters for the mini BERT model
@@ -320,6 +448,7 @@ class IntegrationTest(unittest.TestCase):
         self.num_attention_heads = 2  # Fewer attention heads
         self.intermediate_size = 128  # Size of the intermediate (feed forward) layer
         self.max_position_embeddings = 32  # maximum sequence length (adjustable)
+        self.max_seq_length = 32
         self.dropout = 0.1
         self.num_experts = 4  # The expert number
         self.num_classes = 2  # For binary classification
@@ -382,6 +511,65 @@ class IntegrationTest(unittest.TestCase):
         labels = torch.randint(0, self.num_classes, (self.batch_size, ))
 
         bert_training(model, optimizer, loss_fn, inputs, labels)
+
+    def test_distributed_moe(self):
+        if torch.cuda.is_available() and torch.cuda.device_count() > 2:
+            devices = [torch.device('cuda:0'), torch.device('cuda:1')]
+        else:
+            devices = [torch.device('cpu'), torch.device('cpu')]
+
+        mini_transformer = MiniTransformerMoE(
+            self.vocab_size,
+            self.hidden_size,
+            self.num_hidden_layers,
+            self.num_attention_heads,
+            self.intermediate_size,
+            self.max_seq_length,
+            self.dropout,
+            self.num_experts,
+            devices)
+
+        # Build the classification model.
+        model = TransformerForSeqenceClassificationMoE(mini_transformer,
+                                                       self.hidden_size,
+                                                       self.num_classes,
+                                                       self.dropout)
+
+        # Move model to a main device (e.g. devices[0])
+        main_device = devices[0]
+        model.to(main_device)
+
+        # Define optimizer and loss function.
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        loss_fn = nn.CrossEntropyLoss()
+
+        # Create dummy input data.
+        inputs = torch.randint(0, self.vocab_size, (self.batch_size, self.max_seq_length)).to(main_device)
+        labels = torch.randint(0, self.num_classes, (self.batch_size,)).to(main_device)
+
+        # Training loop
+        model.train()
+        for epoch in range(10):
+            optimizer.zero_grad()
+
+            logits, load_loss = model(inputs)
+            classification_loss = loss_fn(logits, labels)
+
+            total_loss = classification_loss + 0.01 * load_loss
+            total_loss.backward()
+            optimizer.step()
+
+            print(f'Epoch {epoch+1}, ',
+                  f'Total loss: {total_loss.item():.4f}, ',
+                  f'Classification Loss: {classification_loss.item():.4f}, ',
+                  f'Load Loss: {load_loss.item():.4f}')
+
+        # Inference demonstration.
+        model.eval()
+        with torch.no_grad():
+            logits, _ = model(inputs)
+            predictions = torch.argmax(logits, dim=1)
+            print('Predictions: ', predictions.tolist())
 
 
 if __name__ == '__main__':
