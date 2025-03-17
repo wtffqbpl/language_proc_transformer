@@ -12,7 +12,10 @@ from .attention_utils import (
     Encoder,
     EncoderDecoder,
     PositionalEncoding,
-    AttentionDecoder)
+    AttentionDecoder,
+    PositionWiseFFN,
+    AddNorm,
+    EncoderBlock)
 import os
 import sys
 from pathlib import Path
@@ -24,43 +27,6 @@ from recurrent_neural_network.rnn_utils import (
     train_seq2seq,
     predict_seq2seq,
     bleu)
-
-
-class PositionWiseFFN(nn.Module):
-    """Feed-forward network based position"""
-    def __init__(self, ffn_num_input, ffn_num_hiddens, ffn_num_outputs, **kwargs):
-        super(PositionWiseFFN, self).__init__(**kwargs)
-        self.dense1 = nn.Linear(ffn_num_input, ffn_num_hiddens)
-        self.relu = nn.ReLU()
-        self.dense2 = nn.Linear(ffn_num_hiddens, ffn_num_outputs)
-
-    def forward(self, x):
-        return self.dense2(self.relu(self.dense1(x)))
-
-
-class AddNorm(nn.Module):
-    def __init__(self, normalized_shape, dropout, **kwargs):
-        super(AddNorm, self).__init__(**kwargs)
-        self.dropout = nn.Dropout(dropout)
-        self.ln = nn.LayerNorm(normalized_shape)
-
-    def forward(self, x, y):
-        return self.ln(self.dropout(y) + x)
-
-
-class EncoderBlock(nn.Module):
-    def __init__(self, key_size, query_size, value_size, num_hiddens, norm_shape,
-                 ffn_num_input, ffn_num_hiddens, num_heads, dropout, use_bias=False, **kwargs):
-        super(EncoderBlock, self).__init__(**kwargs)
-        self.attention = MultiHeadAttention(
-            key_size, query_size, value_size, num_hiddens, num_heads, dropout, use_bias)
-        self.add_norm1 = AddNorm(norm_shape, dropout)
-        self.ffn = PositionWiseFFN(ffn_num_input, ffn_num_hiddens, num_hiddens)
-        self.add_norm2 = AddNorm(norm_shape, dropout)
-
-    def forward(self, x: torch.Tensor, valid_lens: torch.Tensor):
-        y = self.add_norm1(x, self.attention(x, x, x, valid_lens))
-        return self.add_norm2(y, self.ffn(y))
 
 
 class TransformerEncoder(Encoder, ABC):

@@ -25,7 +25,7 @@ eos_token = 2  # end-of-sequence token
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         """
-        Initialzie the PositionalEncoding module.
+        Initialize the PositionalEncoding module.
         :param d_model: the dimension of the embeddings.
         :param dropout: dropout rate.
         :param max_len: maximum length of the sequences.

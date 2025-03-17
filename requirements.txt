@@ -1,5 +1,5 @@
-torch~=2.7.0.dev20250311
-torchvision~=0.22.0.dev20250312
+torch~=2.6
+torchvision~=0.21
 requests>=2.31.0
 numpy~=1.23.5
 matplotlib~=3.10.0
