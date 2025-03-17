@@ -120,6 +120,81 @@ class TransformerBlock(nn.Module):
         return x
 
 
+# MoE Layer replacing FFN
+class MoE(nn.Module):
+    """ MoE layer contains multiple FFN expert and one Gated network """
+    def __init__(self, hidden_size, intermediate_size, dropout, num_experts=4):
+        super(MoE, self).__init__()
+        self.num_experts = num_experts
+        # Define multiple experts, each expert is a FFN layer.
+        self.experts = nn.ModuleList([
+            FeedForward(hidden_size, intermediate_size, dropout) for _ in range(num_experts)
+        ])
+
+        # Gated network: Output the expert score
+        self.gate = nn.Linear(hidden_size, num_experts)
+
+    def forward(self, x: torch.Tensor):
+        # Compute each expert score for the input token, and calculate the probability using softmax.
+        gate_logits = self.gate(x)
+        gate_weights = F.softmax(gate_logits, dim=-1)  # (batch_size, seq_length, num_experts)
+
+        # Compute each expert output, each tensor shape in the list is (batch_size, seq_length, hidden_size)
+        expert_outputs = [expert(x) for expert in self.experts]
+        # Concat expert outputs. Shape: (batch_size, seq_length, num_experts, hidden_size)
+        expert_outputs = torch.stack(expert_outputs, dim=2)
+
+        # Weighted output for each expert scores
+        gate_weights = gate_weights.unsqueeze(-1)  # shape: (batch_size, seq_length, num_experts, 1)
+        output = torch.sum(gate_weights * expert_outputs, dim=2)  # shape: (batch_size, req_length, hidden_size)
+        return output
+
+
+class TransformerBlockMoE(nn.Module):
+    def __init__(self, hidden_size, num_attention_heads, intermediate_size, dropout, num_experts=4):
+        super(TransformerBlockMoE, self).__init__()
+        self.attention = MultiHeadSelfAttention(hidden_size, num_attention_heads, dropout)
+        self.attention_norm = nn.LayerNorm(hidden_size)
+
+        # Using MoE layer instead of FeedForward layer
+        self.moe = MoE(hidden_size, intermediate_size, dropout, num_experts)
+        self.ff_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x: torch.Tensor):
+        # self-attention + residuals + layer normalization
+        attn_output = self.attention(x)
+        x = self.attention_norm(x + attn_output)
+        # MoE + residuals + layer normalization
+        moe_output = self.moe(x)
+        x = self.ff_norm(x + moe_output)
+        return x
+
+
+class MiniBertMoE(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_hidden_layers, num_attention_heads,
+                 intermediate_size, max_position_embeddings, num_experts, dropout):
+        super(MiniBertMoE, self).__init__()
+        self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
+        self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layers = nn.ModuleList([
+            TransformerBlockMoE(hidden_size, num_attention_heads, intermediate_size, dropout, num_experts)
+            for _ in range(num_hidden_layers)
+        ])
+
+    def forward(self, input_ids: torch.Tensor):
+        batch_size, seq_length = input_ids.size()
+        position_ids = torch.arange(seq_length, device=input_ids.device).unsqueeze(0).expand(batch_size, seq_length)
+        x = self.token_embeddings(input_ids) + self.position_embeddings(position_ids)
+        x = self.layer_norm(x)
+        x = self.dropout(x)
+
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
 # Mini BERT Model
 class MiniBert(nn.Module):
     def __init__(self, vocab_size, hidden_size, num_hidden_layers, num_attention_heads,
@@ -198,6 +273,44 @@ class BertForSequenceClassification(nn.Module):
         return logits
 
 
+class BertForSequenceClassificationMoE(nn.Module):
+    def __init__(self, bert_model, hidden_size, num_classes, dropout):
+        super(BertForSequenceClassificationMoE, self).__init__()
+        self.bert = bert_model
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, input_ids: torch.Tensor):
+        bert_output = self.bert(input_ids)
+        cls_token = bert_output[:, 0, :]
+        cls_token = self.dropout(cls_token)
+        logits = self.classifier(cls_token)
+        return logits
+
+
+def bert_training(model, optimizer, loss_fn, inputs, labels):
+    model.train()
+    print('Starting training...')
+    for epoch in range(10):
+        optimizer.zero_grad()
+        # Forward pass: compute logits
+        logits = model(inputs)
+        # Compute loss
+        loss = loss_fn(logits, labels)
+        # Backward pass: compute gradients and update parameters
+        loss.backward()
+        optimizer.step()
+        print(f'Epoch {epoch+1}, Loss: {loss.item():.4f}')
+
+    # Inference example
+    model.eval()
+    with torch.no_grad():
+        logits = model(inputs)
+        # use argmax to get predicted class indices
+        predictions = torch.argmax(logits, dim=1)
+        print('Predictions: ', predictions.tolist())
+
+
 class IntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         # Hyperparameters for the mini BERT model
@@ -208,6 +321,7 @@ class IntegrationTest(unittest.TestCase):
         self.intermediate_size = 128  # Size of the intermediate (feed forward) layer
         self.max_position_embeddings = 32  # maximum sequence length (adjustable)
         self.dropout = 0.1
+        self.num_experts = 4  # The expert number
         self.num_classes = 2  # For binary classification
         self.batch_size = 8
         self.bert_model_path = os.path.join(str(Path(__file__).resolve().parent), 'bert_model.pth')
@@ -238,26 +352,36 @@ class IntegrationTest(unittest.TestCase):
         # Create dummy labels for binary classification (0 or 1)
         labels = torch.randint(0, self.num_classes, (self.batch_size, ))
 
-        model.train()
-        print('Starting training...')
-        for epoch in range(10):
-            optimizer.zero_grad()
-            # Forward pass: compute logits
-            logits = model(inputs)
-            # Compute loss
-            loss = loss_fn(logits, labels)
-            # Backward pass: compute gradients and update parameters
-            loss.backward()
-            optimizer.step()
-            print(f'Epoch {epoch+1}, Loss: {loss.item():.4f}')
+        bert_training(model, optimizer, loss_fn, inputs, labels)
 
-        # Inference example
-        model.eval()
-        with torch.no_grad():
-            logits = model(inputs)
-            # use argmax to get predicted class indices
-            predictions = torch.argmax(logits, dim=1)
-            print('Predictions: ', predictions.tolist())
+    def test_bert_with_moe(self):
+        # instantiate the MiniBERT model
+        mini_bert_moe = MiniBertMoE(self.vocab_size,
+                                    self.hidden_size,
+                                    self.num_hidden_layers,
+                                    self.num_attention_heads,
+                                    self.intermediate_size,
+                                    self.max_position_embeddings,
+                                    self.num_experts,
+                                    self.dropout)
+
+        # Create the full model with a classification head
+        model = BertForSequenceClassificationMoE(mini_bert_moe,
+                                                 self.hidden_size,
+                                                 self.num_classes,
+                                                 self.dropout)
+
+        # Define optimizer and loss function
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        loss_fn = nn.CrossEntropyLoss()
+
+        # Dummy Training Example
+        # Create dummy input data: random token ids of shape (batch_size, max_position_size)
+        inputs = torch.randint(0, self.vocab_size, (self.batch_size, self.max_position_embeddings))
+        # Create dummy labels for binary classification (0 or 1)
+        labels = torch.randint(0, self.num_classes, (self.batch_size, ))
+
+        bert_training(model, optimizer, loss_fn, inputs, labels)
 
 
 if __name__ == '__main__':
