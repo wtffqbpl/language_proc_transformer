@@ -4,6 +4,12 @@ import unittest
 import torch
 import torch.nn as nn
 from .attention_utils import EncoderBlock
+import random
+import os
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import utils.dlf as dlf
 
 
 def get_tokens_and_segments(tokens_a, tokens_b=None):
@@ -122,6 +128,125 @@ class BERTModel(nn.Module):
         # 0 is the index of the `<cls>` token.
         nsp_y_hat = self.nsp(self.hidden(encoded_x[:, 0, :]))
         return encoded_x, mlm_y_hat, nsp_y_hat
+
+
+dlf.DATA_HUB['wikitext-2'] = (
+    'https://s3.amazonaws.com/research.metamind.io/wikitext/'
+    'wikitext-2-v1.zip', '3c914d17d80b1459be871a5039ac23e752a53cbe')
+
+
+def read_wiki(data_dir):
+    file_name = os.path.join(data_dir, 'wiki.train.tokens')
+    with open(file_name, 'r') as f:
+        lines = f.readlines()
+    # Uppercase letters are converted to lowercase ones
+    paragraphs = [line.strip().lower().split(' . ')
+                  for line in lines if len(line.split(' . ')) >= 2]
+    random.shuffle(paragraphs)
+    return paragraphs
+
+
+def get_next_sentence(sentence, next_sentence, paragraphs):
+    if random.random() < 0.5:
+        is_next = True
+    else:
+        # paragraphs is a list of lists of lists
+        next_sentence = random.choice(random.choice(paragraphs))
+        is_next = False
+    return sentence, next_sentence, is_next
+
+
+# The following function generates training examples for next sentence prediction from
+# the input paragraph by invoking the get_next_sentence function. Here paragraph is a
+# list of sentences, where each sentence is a list of tokens. The argument max_len
+# specifies the maximum length of a BERT input sentence during pretraining.
+def get_nsp_data_from_paragraph(paragraph, paragraphs, vocab, max_len):
+    nsp_data_from_paragraph = []
+    for i in range(len(paragraph) - 1):
+        tokens_a, tokens_b, is_next = get_next_sentence(
+            paragraph[i], paragraph[i + 1], paragraphs)
+        # Consider 1 '<cls>' token and 2 '<sep>' tokens
+        if len(tokens_a) + len(tokens_b) + 3 > max_len:
+            continue
+        tokens, segments = get_tokens_and_segments(tokens_a, tokens_b)
+        nsp_data_from_paragraph.append((tokens, segments, is_next))
+    return nsp_data_from_paragraph
+
+
+# Generate training examples for the masked language modeling task from a BERT input sequence.
+def replace_mlm_tokens(tokens, candidate_pred_positions, num_mlm_preds, vocab):
+    # For the input of a masked language model, make a new copy of tokens and
+    # replace some of them by '<mask>' or random tokens.
+    mlm_input_tokens = [token for token in tokens]
+    pred_positions_and_labels = []
+    # Shuffle for getting 15% random tokens for prediction in the masked language
+    # modeling task
+    random.shuffle(candidate_pred_positions)
+    for mlm_pred_position in candidate_pred_positions:
+        if len(pred_positions_and_labels) > num_mlm_preds:
+            break
+        masked_token = None
+
+        # 80% of the time: replace the word with the '<mask>' token
+        if random.random() < 0.8:
+            masked_token = '<mask>'
+        else:
+            if random.random() < 0.5:
+                # 10% of the time: keep the word unchanged
+                masked_token = tokens[mlm_pred_position]
+            else:
+                # 10% of the time: replace the word with a random word
+                masked_token = random.choice(vocab.idx_to_token)
+        mlm_input_tokens[mlm_pred_position] = masked_token
+        pred_positions_and_labels.append(
+            (mlm_pred_position, tokens[mlm_pred_position]))
+    return mlm_input_tokens, pred_positions_and_labels
+
+
+def get_mlm_data_from_tokens(tokens, vocab):
+    candidate_pred_positions = []
+    # tokens is a list of strings
+    for i, token in enumerate(tokens):
+        # Special tokens are not predicted in the masked language modeling task
+        if token in ['<cls>', '<sep>']:
+            continue
+        candidate_pred_positions.append(i)
+    # 15% of random tokens are predicted in the masked language modeling
+    num_mlm_preds = max(1, round(len(tokens) * 0.15))
+    mlm_input_tokens, pred_positions_and_labels = replace_mlm_tokens(
+        tokens, candidate_pred_positions, num_mlm_preds, vocab)
+    pred_positions_and_labels = sorted(pred_positions_and_labels, key=lambda x: x[0])
+    pred_positions = [v[0] for v in pred_positions_and_labels]
+    mlm_pred_labels = [v[1] for v in pred_positions_and_labels]
+    return vocab[mlm_input_tokens], pred_positions, vocab[mlm_pred_labels]
+
+
+def pad_bert_inputs(examples, max_len, vocab):
+    max_num_mlm_preds = round(max_len * 0.15)
+    all_token_ids, all_segments, valid_lens, = [], [], []
+    all_pred_positions, all_mlm_weights, all_mlm_labels = [], [], []
+    nsp_labels = []
+
+    for token_ids, pred_positions, mlm_pred_label_ids, segments, is_next in examples:
+        all_token_ids.append(torch.tensor(token_ids + [vocab['<pad>']] * (
+            max_len - len(token_ids)), dtype=torch.long))
+        all_segments.append(torch.tensor(segments + [0] * (
+            max_len - len(segments)), dtype=torch.long))
+        # valid_lens excludes count of <pad> tokens
+        valid_lens.append(torch.tensor(len(token_ids), dtype=torch.float32))
+        all_pred_positions.append(torch.tensor(pred_positions + [0] * (
+            max_num_mlm_preds - len(pred_positions)), dtype=torch.long))
+
+        # Predictions of padded tokens will be filtered out in the loss via
+        # multiplication of 0 weights
+        all_mlm_weights.append(
+            torch.tensor([1.0] * len(mlm_pred_label_ids) + [0.0] * (
+                max_num_mlm_preds - len(pred_positions)), dtype=torch.float32))
+        all_mlm_labels.append(torch.tensor(mlm_pred_label_ids + [0] * (
+            max_num_mlm_preds - len(mlm_pred_label_ids)), dtype=torch.long))
+    return (all_token_ids, all_segments, valid_lens, all_pred_positions,
+            all_mlm_weights, all_mlm_labels, nsp_labels)
+
 
 
 class IntegrationTest(unittest.TestCase):
