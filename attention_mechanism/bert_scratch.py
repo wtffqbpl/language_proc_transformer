@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import utils.dlf as dlf
+from recurrent_neural_network.rnn_utils import Vocab
 
 
 def get_tokens_and_segments(tokens_a, tokens_b=None):
@@ -248,6 +249,54 @@ def pad_bert_inputs(examples, max_len, vocab):
             all_mlm_weights, all_mlm_labels, nsp_labels)
 
 
+def tokenize(lines, token='word'):
+    if token == 'word':
+        return [line.split() for line in lines]
+    elif token == 'char':
+        return [list(line) for line in lines]
+    else:
+        print("Error: unexpected token: %s" % token)
+        raise KeyError
+
+
+class WikiTextDataset(torch.utils.data.Dataset):
+    def __init__(self, paragraphs, max_len):
+        paragraphs = [tokenize(paragraph, token='word') for paragraph in paragraphs]
+        sentences = [sentence for paragraph in paragraphs for sentence in paragraph]
+        self.vocab = Vocab(sentences, min_freq=5, reserved_tokens=[
+            '<pad>', '<mask>', '<cls>', '<sep>'])
+        examples = []
+        for paragraph in paragraphs:
+            examples.append(get_nsp_data_from_paragraph(paragraph, paragraphs, self.vocab, max_len))
+
+        examples = [(get_mlm_data_from_tokens(tokens, self.vocab) + (segments, is_next))
+                    for tokens, segments, is_next in examples]
+
+        (self.all_token_ids, self.all_segments, self.valid_lens,
+         self.all_pred_positions, self.all_mlm_weights,
+         self.all_mlm_labels, self.nsp_labels) = pad_bert_inputs(examples, max_len, self.vocab)
+
+    def __getitem__(self, idx):
+        return (self.all_token_ids[idx], self.all_segments[idx],
+                self.valid_lens[idx], self.all_pred_positions[idx],
+                self.all_mlm_weights[idx], self.all_mlm_labels[idx],
+                self.nsp_labels[idx])
+
+    def __len__(self):
+        return len(self.all_token_ids)
+
+
+def load_data_wiki(batch_size, max_len):
+    """ Load WikiText-2 dataset """
+    num_workers = 4
+    # data_dir = dlf.download_extract('wikitext-2', 'wikitext-2')
+    data_dir = os.path.join(str(Path(__file__).resolve().parent))
+    paragraphs = read_wiki(data_dir)
+    train_set = WikiTextDataset(paragraphs, max_len)
+    train_iter = torch.utils.data.DataLoader(train_set, batch_size, shuffle=True, num_workers=num_workers)
+
+    return train_iter, train_set.vocab
+
 
 class IntegrationTest(unittest.TestCase):
     def test_bert_encoder(self):
@@ -290,6 +339,19 @@ class IntegrationTest(unittest.TestCase):
 
         # Depress warning
         self.assertTrue(True)
+
+    def test_wiki_dataset(self):
+        batch_size, max_len = 512, 64
+        train_iter, vocab = load_data_wiki(batch_size, max_len)
+
+        for (tokens_x, segments_x, valid_lens_x, pred_positions_x, mlm_weights_x,
+             mlm_y, nsp_y) in train_iter:
+            print(tokens_x.shape, segments_x.shape, valid_lens_x.shape,
+                  pred_positions_x.shape, mlm_weights_x.shape, mlm_y.shape,
+                  nsp_y.shape)
+
+        self.assertTrue(True)
+        pass
 
 
 if __name__ == '__main__':
