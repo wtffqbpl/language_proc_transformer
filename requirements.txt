@@ -15,3 +15,7 @@ opencv-contrib-python
 pytest~=8.3.4
 bertviz~=1.4.0
 huggingface_hub~=0.24.6
+scikit-learn~=1.5.2
+spacy~=3.8.4
+torchtext~=0.16
+timm~=1.0.15
