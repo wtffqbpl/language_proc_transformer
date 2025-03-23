@@ -1,6 +1,7 @@
 #! coding: utf-8
 
 import unittest
+import math
 import numpy as np
 import torch
 from mpl_toolkits import mplot3d
@@ -10,6 +11,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from utils.plot import plot
+import utils.dlf as dlf
 
 
 def f(x):
@@ -94,6 +96,32 @@ class GradientDescentCase:
         show_trace_2d(self.f_2d, train_2d(self.gd_2d, f_grad=self.f_2d_grad))
 
 
+class SGDCases:
+    def __init__(self, eta, lr_fn):
+        self.lr_fn = lr_fn
+        self.eta = eta
+        pass
+
+    def f(self, x1, x2):
+        return x1 ** 2 + 2 * x2**2
+
+    def f_grad(self, x1, x2):
+        return 2 * x1, 4 * x2
+
+    def sgd(self, x1, x2, s1, s2, grad_fn):
+        g1, g2 = grad_fn(x1, x2)
+
+        # Simulate gradients with noise
+        g1 += torch.normal(0.0, 1, (1, ))
+        g2 += torch.normal(0.0, 1, (1,))
+        eta_t = self.eta * self.lr_fn()
+        return (x1 - eta_t * g1).item(), (x2 - eta_t * g2).item(), 0, 0
+
+
+t = 1
+k = 1
+
+
 class IntegrationTest(unittest.TestCase):
     def test_risky(self):
         x = torch.arange(0.5, 1.5, 0.01)
@@ -146,6 +174,63 @@ class IntegrationTest(unittest.TestCase):
         gd_case.gradient_descent_2d(eta)
 
         self.assertTrue(True)
+
+    def test_sgd(self):
+        def constant_lr():
+            return 1
+
+        eta = 0.1
+        sgd_handle = SGDCases(eta, constant_lr)
+        show_trace_2d(sgd_handle.f, train_2d(sgd_handle.sgd, steps=50, f_grad=sgd_handle.f_grad))
+        plt.show()
+
+        def exponential_lr():
+            global t
+            t += 1
+            return math.exp(-0.1 * t)
+
+        sgd_handle = SGDCases(eta, exponential_lr)
+        show_trace_2d(sgd_handle.f, train_2d(sgd_handle.sgd, steps=50, f_grad=sgd_handle.f_grad))
+        plt.show()
+
+        # polynomial learning rate
+        def polynomial_lr():
+            global k
+            k += 1
+            return (1 + 0.1 * k) ** (-0.5)
+
+        sgd_handle = SGDCases(eta, polynomial_lr)
+        show_trace_2d(sgd_handle.f, train_2d(sgd_handle.sgd, steps=50, f_grad=sgd_handle.f_grad))
+
+        self.assertTrue(True)
+
+
+# Mini-batch SGD
+
+dlf.DATA_HUB['airfoil'] = (dlf.DATA_URL + 'airfoil_self_noise.dat',
+                           '76e5be1548fd8222e5074cf0faae75edff8cf93f')
+
+
+def get_data(batch_size=10, n=1500):
+    data = np.getfromtxt(dlf.download('airfoil'), dtype=np.float32, dtlimiter='\t')
+    data = torch.from_numpy((data - data.mean(axis=0)) / data.std(axis=0))
+    data_iter = dlf.load_array((data[:n, :-1], data[:n, -1]), batch_size, is_train=True)
+    return data_iter, data.shape[1] - 1
+
+
+def sgd(params, states, hyperparams):
+    for p in params:
+        p.data.sub_(hyperparams['lr'] * p.grad)
+        p.grad.data.zero_()
+
+
+def train(trainer_fn, states, hyperparams, data_iter, feature_dim, num_epochs=2):
+    # Init model
+    w = torch.normal(mean=0.0, std=0.01, size=(feature_dim, 1), requires_grad=True)
+    b = torch.zeros((1), requires_grad=True)
+
+    # net, loss = lambda X: dlf.li
+    pass
 
 
 if __name__ == '__main__':
