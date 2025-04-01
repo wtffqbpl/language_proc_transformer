@@ -11,6 +11,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import math
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+import utils.dlf as dlf
 
 
 # 1. Transformer MoE components
@@ -287,6 +291,135 @@ def train(model: nn.Module,
               f'(Main: {epoch_main_loss:.4f}, Aux: {epoch_aux_loss:.4f}), Accuracy: {epoch_acc:.4f}')
 
     print('Training finished.')
+
+
+@torch.no_grad()  # Using decorator to avoid gradient tracking
+def evaluate_model(model: nn.Module, data_iter: DataLoader, device) -> float:
+    model.eval()
+    running_loss = 0.0
+    correct_predictions = 0
+    total_samples = 0
+
+    print('Starting evaluation...')
+    for inputs, labels in data_iter:
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        # Forward pass
+        logits, _, _ = model(inputs)  # Ignore the auxiliary loss and gating weights during evaluation
+
+        _, predicted = torch.max(logits.data, 1)
+        total_samples += labels.size(0)
+
+        correct_predictions += (predicted == labels).sum().item()
+
+    avg_loss = running_loss / total_samples
+    accuracy = correct_predictions / total_samples
+    print(f'Test Set: Average Loss: {avg_loss:.4f}',
+          f'Accuracy: {accuracy:.4f}',
+          f'({correct_predictions}/{total_samples})')
+    return accuracy
+
+
+class IntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.image_size = 28
+        self.patch_size = 7  # 28x28 -> 4x4=16 patches
+        self.in_channels = 1
+        self.num_classes = 10
+        self.d_model = 128  # Transformer dimension
+        self.nhead = 4  # Number of heads in multi-head attention
+        self.num_encoder_layers = 4  # Transformer encoder layers
+        self.num_experts = 4  # Number of experts in MoE
+        self.d_ffn = self.d_model * 2  # FFN/Expert middle layer dimension (usually 2*d_model)
+        self.dropout = 0.1
+        self.learning_rate = 0.001
+        self.batch_size = 128
+        self.num_epochs = 10  # Transformer may need more epochs to converge
+        self.model_save_path = 'vit_moe_fashionmnist.pth'
+
+        self.fashion_mnist_classes = [
+            'T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat',
+            'Sandal', 'Shirt', 'Sneaker', 'Bag', 'Ankle boot']
+
+        self.device = dlf.devices()[0]
+        print(f'Using device: {self.device}')
+
+    def test_training(self):
+        print('\n--- Training Phase ---')
+        train_iter, test_iter = get_dataloaders(batch_size=self.batch_size)
+        model = ViTMoEClassifier(
+            img_size=self.image_size, patch_size=self.patch_size,
+            in_channels=self.in_channels, num_classes=self.num_classes,
+            d_model=self.d_model, nhead=self.nhead,
+            num_encoder_layers=self.num_encoder_layers, num_experts=self.num_experts,
+            d_ffn=self.d_ffn, dropout=self.dropout).to(self.device)
+
+        criterion = nn.CrossEntropyLoss()
+        # AdamW is also a good choice for Transformer models
+        optimizer = optim.AdamW(model.parameters(), lr=self.learning_rate, weight_decay=0.01)
+        train(model, train_iter, optimizer, criterion, self.device, num_epochs=self.num_epochs)
+
+        # Save model
+        torch.save(model.state_dict(), self.model_save_path)
+        print(f'Model saved to {self.model_save_path}')
+
+    def test_inference(self):
+        if not os.path.exists(self.model_save_path):
+            self.test_training()
+
+        inference_model = ViTMoEClassifier(
+            img_size=self.image_size, patch_size=self.patch_size,
+            in_channels=self.in_channels, num_classes=self.num_classes,
+            d_model=self.d_model, nhead=self.nhead,
+            num_encoder_layers=self.num_encoder_layers, num_experts=self.num_experts,
+            d_ffn=self.d_ffn, dropout=self.dropout).to(self.device)
+
+        inference_model.load_state_dict(torch.load(self.model_save_path, map_location=self.device))
+
+        inference_model.eval()
+        print(f'Model loaded from {self.model_save_path}')
+
+        _, inference_test_iter = get_dataloaders(batch_size=5)
+        data_iter = iter(inference_test_iter)
+        images, labels = next(data_iter)
+        images, labels = images.to(self.device), labels.to(self.device)
+
+        with torch.no_grad():
+            logits, _, gating_weights = inference_model(images)
+            _, predicted_classes = torch.max(logits, 1)
+
+        images_np = images.cpu().numpy()
+        labels_np = labels.cpu().numpy()
+        predicted_classes_np = predicted_classes.cpu().numpy()
+        gating_weights_np = gating_weights.cpu().numpy()
+
+        # all_gating_weights is a list of tensors, one per layer
+        # shape of each tensor: (batch_size, seq_len, num_experts)
+
+        print('\nInference Results (Sample Batch):')
+        fig, axes = plt.subplots(1, images.size(0), figsize=(15, 5))
+        if images.size(0) == 1:
+            axes = [axes]
+
+        for i in range(images.size(0)):
+            ax = axes[i]
+            img = images_np[i].squeeze() * 0.5 + 0.5  # De-normalize
+            ax.imshow(img, cmap='gray')
+            ax.set_title(
+                f'Pred: {self.fashion_mnist_classes[predicted_classes_np[i]]}\nTrue:',
+                f'{self.fashion_mnist_classes[labels_np[i]]}')
+            ax.axis('off')
+
+            # Print the gating weights
+            print(f'\n--- Sample {i+1} ---')
+            print(f'True Label: {self.fashion_mnist_classes[labels_np[i]]}')
+            print(f'Predicted Label: {self.fashion_mnist_classes[predicted_classes_np[i]]}')
+            print('Gating Weights:')
+            for expert_idx in range(self.num_experts):
+                print(f'  Expert {expert_idx+1}: {gating_weights_np[i, expert_idx]:.4f}')
+
+        plt.tight_layout()
+        plt.show()
 
 
 if __name__ == '__main__':
