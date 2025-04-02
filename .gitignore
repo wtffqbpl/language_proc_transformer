@@ -10,3 +10,4 @@ train/
 val/
 *.pth
 *.pt
+*.onnx
