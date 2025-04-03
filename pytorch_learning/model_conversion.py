@@ -3,6 +3,7 @@
 import unittest
 import torch
 from torchvision.models import resnet18
+from torchstat import stat
 
 
 class IntegrationTest(unittest.TestCase):
@@ -12,6 +13,13 @@ class IntegrationTest(unittest.TestCase):
 
         dummy_input = torch.randn((1, 3, 224, 224))
         torch.onnx.export(model, dummy_input, "resnet18.onnx")
+
+        self.assertTrue(True)
+
+    def test_torchstat(self):
+        model = resnet18(pretrained=False)
+
+        stat(model, (3, 224, 224))
 
         self.assertTrue(True)
 
