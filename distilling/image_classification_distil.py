@@ -3,6 +3,7 @@
 import unittest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
 from torchvision.transforms import transforms
 import sys
@@ -71,16 +72,103 @@ class TeacherModel(nn.Module):
         return self.vgg16_bn(x)
 
 
+def distillation_loss(y_student, y_teacher, labels, T, alpha):
+    """ Compute distillation loss using KL divergence """
+    # The ground truth cross entropy
+    loss_ce = F.cross_entropy(y_student, labels)
+
+    # soft label cross entropy loss
+    p_student = F.log_softmax(y_student / T, dim=1)
+    p_teacher = F.softmax(y_teacher / T, dim=1)
+
+    loss_kd = F.kl_div(p_student, p_teacher, reduction='batchmean') * (T * T)
+
+    return alpha * loss_kd + (1 - alpha) * loss_ce
+
+
+def train_teacher(model: nn.Module,
+                  data_iter: torch.utils.data.DataLoader,
+                  optimizer, scheduler, criterion, num_epochs, device):
+
+    model.train()
+
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for inputs, labels in data_iter:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            output = model(inputs)
+
+            loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            running_loss += loss.item() * inputs.size(0)
+
+        epoch_loss = running_loss / len(data_iter)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}')
+
+
+def train_distil_student(model_student: nn.Module,
+                         model_teacher: nn.Module,
+                         data_iter: torch.utils.data.DataLoader,
+                         optimizer, scheduler, num_epochs,
+                         temperature, alpha, device):
+
+    model_student.train()
+
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for inputs, labels in data_iter:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            # Compute student model
+            optimizer.zero_grad()
+            output_student = model_student(inputs)
+
+            # Compute teacher model (Notes: should not update teacher model parameters)
+            with torch.no_grad():
+                output_teacher = model_teacher(inputs)
+
+            loss = distillation_loss(output_student, output_teacher, labels, temperature, alpha)
+
+            loss.backward()  # Compute backward weights
+            optimizer.step()  # Update weights
+            scheduler.step()  # Update learning rate
+
+            running_loss += loss.item() * inputs.size(0)
+
+        epoch_loss = running_loss / len(data_iter)
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}')
+
+
 def load_datasets(batch_size, data_transforms):
     train_dataset = torchvision.datasets.CIFAR10(
-        root='../data', train=True, download=True, transform=data_transforms)
+        root='../data', train=True, download=True, transform=data_transforms['train'])
     test_dataset = torchvision.datasets.CIFAR10(
-        root='../data', train=False, download=True, transform=data_transforms)
+        root='../data', train=False, download=True, transform=data_transforms['infer'])
 
     return (
         torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4),
         torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=4),
     )
+
+
+def inference(model, data_iter, device):
+    model.eval()
+
+    correct, total = 0, 0
+
+    with torch.no_grad():
+        for inputs, labels in data_iter:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    return correct / total
 
 
 class IntegrationTest(unittest.TestCase):
@@ -92,10 +180,17 @@ class IntegrationTest(unittest.TestCase):
         crop_size = 224  # Image cropping size
 
         batch_size = 128
-        num_epochs_teacher = 10
-        num_epochs_student = 20
-        learning_rate = 0.001
+        num_epochs_teacher = 20
+        num_epochs_student = 140
+        learning_rate_student_initial = 0.1
+        update_student_lr_steps = 40
+        update_student_lr_ratio = 0.2
+
+        learning_rate_teacher_initial = 0.1
+        update_teacher_lr_steps = 10
+        update_teacher_lr_ratio = 0.1
         temperature = 4.0
+        alpha = 0.7  # soft label (for teacher model) loss weight
 
         # Data preprocessing and augmentation methods
         data_transforms = {
@@ -107,7 +202,7 @@ class IntegrationTest(unittest.TestCase):
                 transforms.ToTensor(),
                 transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
             ]),
-            'val': transforms.Compose([
+            'infer': transforms.Compose([
                 transforms.Resize(image_size),
                 transforms.CenterCrop(crop_size),
                 transforms.ToTensor(),
@@ -117,7 +212,35 @@ class IntegrationTest(unittest.TestCase):
 
         train_iter, test_iter = load_datasets(batch_size=batch_size, data_transforms=data_transforms)
 
-        print(next(train_iter))
+        teacher = TeacherModel().to(device=self.device)
+        student = SimpleConv5().to(device=self.device)
+
+        optimizer_teacher = torch.optim.Adam(teacher.parameters(), lr=learning_rate_teacher_initial)
+        scheduler_teacher = torch.optim.lr_scheduler.StepLR(
+            optimizer_teacher, step_size=update_teacher_lr_steps, gamma=update_teacher_lr_ratio)
+
+        criterion_teacher = nn.CrossEntropyLoss()
+
+        # Teacher model training
+        print('Training teacher model...')
+        train_teacher(teacher, train_iter, optimizer_teacher, scheduler_teacher,
+                      criterion_teacher, num_epochs_teacher, self.device)
+
+        # Fix teacher model parameters
+        teacher.eval()
+
+        # Student model optimizer and scheduler
+        optimizer_student = torch.optim.SGD(student.parameters(), lr=learning_rate_student_initial)
+        scheduler_student = torch.optim.lr_scheduler.StepLR(
+            optimizer_student, step_size=update_student_lr_steps, gamma=update_student_lr_ratio)
+
+        print('Training distilling student model...')
+        train_distil_student(student, teacher, train_iter, optimizer_student, scheduler_student,
+                             num_epochs_student, temperature, alpha, self.device)
+
+        acc_student = inference(student, test_iter, self.device)
+
+        print(f'The accuracy of the student model: {acc_student*100:.2f}%')
 
         self.assertTrue(True)
 
