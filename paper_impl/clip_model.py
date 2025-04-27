@@ -1,13 +1,20 @@
 #! coding: utf-8
-
+import io
 import unittest
+import numpy as np
+import requests
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms, models
 from torchvision.models import ResNet50_Weights
-import numpy as np
+from tqdm import tqdm
+from PIL import Image
+import matplotlib.pyplot as plt
+from sklearn.metrics.pairwise import cosine_similarity
+import clip
+
 import os
 import sys
 import pathlib
@@ -321,6 +328,105 @@ class IntegrationTest(unittest.TestCase):
         sims = inference(model, sample_img.repeat(len(dataset.classes), 1, 1, 1), all_tokens)
         best = sims.argmax().item()
         print(f'Predicted: {dataset.classes[best]}')
+
+
+# Ensure deterministic behavior
+seed = 42
+torch.manual_seed(seed)
+np.random.seed(seed)
+
+
+def download_image(url: str) -> Image.Image:
+    """
+    Function to download an image from url
+    """
+    response = requests.get(url)
+    response.raise_for_status()
+
+    return Image.open(io.BytesIO(response.content)).convert('RGB')
+
+
+def build_transform(image_size: int):
+    """ Preprocessing pipeline using torchvision.transforms """
+    return transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
+                             std=(0.26862954, 0.26130258, 0.27577711)),
+    ])
+
+
+class CLIPIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.device = dlf.devices()[0]
+
+        self.model, preprocess = clip.load('ViT-B/32', device=self.device)
+        self.model.eval()
+
+        # Override preprocess with torchvision pipeline to demonstrate third-party usage
+        self.preprocess = build_transform(image_size=224)
+
+    def test_clip_infer(self):
+        image_urls = [
+            "https://images.pexels.com/photos/414612/pexels-photo-414612.jpeg",
+            "https://images.pexels.com/photos/1108099/pexels-photo-1108099.jpeg"
+        ]
+
+        texts = [
+            "A photo of a cat.",
+            "A photo of a dog.",
+            "A photo of a tree.",
+        ]
+
+        # Download and preprocess images
+        images = []
+        for url in tqdm(image_urls, desc="Downloading images"):
+            img = download_image(url)
+            images.append(self.preprocess(img).unsqueeze(0))
+
+        # Batch images
+        image_input = torch.cat(images).to(device=self.device)
+
+        # Tokenize text prompts
+        text_tokens = clip.tokenize(texts).to(self.device)
+
+        # Inference: compute embeddings
+        with torch.no_grad():
+            image_features = self.model.encode_image(image_input)
+            text_features = self.model.encode_text(text_tokens)
+
+        # Normalize embeddings
+        image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=1, keepdim=True)
+
+        # Convert to numpy for sklearn
+        image_features_np = image_features.cpu().numpy()
+        text_features_np = text_features.cpu().numpy()
+
+        # Compute cosine similarity matrix
+        sim_matrix = cosine_similarity(image_features_np, text_features_np)
+
+        # Display results
+        for i, url in enumerate(image_urls):
+            sims = sim_matrix[i]
+            print(sims)
+            best_idx = np.argmax(sims)
+            print(f"Image {i+1} ({url}) most likely: '{texts[best_idx]}' with score {sims[best_idx]:.4f}")
+
+        # Optional: visualize images with their top-1 match
+        fig, axes = plt.subplots(1, len(image_urls), figsize=(5 * len(image_urls), 5))
+
+        if len(image_urls) == 1:
+            axes = [axes]
+        for ax, url, sims in zip(axes, image_urls, sim_matrix):
+            image = download_image(url)
+            best_idx = np.argmax(sims)
+            ax.imshow(image)
+            ax.axis('off')
+            ax.set_title(f"{texts[best_idx]}\nScore: {sims[best_idx]:.2f}")
+        plt.tight_layout()
+        plt.show()
 
 
 if __name__ == "__main__":
